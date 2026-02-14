@@ -767,6 +767,22 @@
     "load_from": "compose",
     "split": "train"
   },
+  "composition_hf": {
+    "formatting": "physics_rl",
+    "file_name": "composition_hf/train",
+    "columns": {
+      "problem": "problem",
+      "question": "question",
+      "solution": "solution",
+      "op": "op",
+      "id": "id",
+      "template": "template",
+      "mode": "mode",
+      "depth": "d"
+    },
+    "load_from": "compose",
+    "split": "train"
+  },
   "context": {
     "formatting": "physics_rl",
     "file_name": "context",
