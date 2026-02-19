@@ -29,10 +29,10 @@ algorithm:
     train_n_updates: 1
     train_mini_batch_size: 512
     device: auto
-    actor_hidden_pooling: last
-    actor_hidden_scope: response
+    actor_hidden_pooling: last # last | mean
+    actor_hidden_scope: full # response | full
     actor_hidden_fp16: true
-    warmup_steps: 0
+    warmup_steps: 10
     cooldown_steps: 0
 
 data:
