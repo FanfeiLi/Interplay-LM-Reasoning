@@ -18,8 +18,9 @@ The function implemented in this file should be used by trainer with different d
 implement PPO-like algorithms.
 """
 
-__all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
+__all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator", "compute_ent_cov_alpha"]
 
+import math
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -30,8 +31,56 @@ from omegaconf import DictConfig
 
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
+from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
+
+
+def compute_ent_cov_alpha(
+    alpha_start: float,
+    alpha_end: float | None,
+    schedule: str,
+    current_step: int,
+    total_steps: int
+) -> float:
+    """
+    Compute the effective Ent-Cov alpha based on schedule.
+    
+    This controls the strength of entropy-based advantage shaping:
+    - alpha=1.0: full Ent-Cov shaping (original behavior)
+    - alpha=0.0: no shaping (vanilla policy loss)
+    - alpha=0.1-0.3: gentle shaping that doesn't hurt performance
+    
+    Args:
+        alpha_start: Initial alpha value (ent_cov_alpha config)
+        alpha_end: Final alpha value (ent_cov_alpha_end config), None means constant
+        schedule: Schedule type: "constant", "linear", "cosine"
+        current_step: Current training step (1-indexed)
+        total_steps: Total training steps
+        
+    Returns:
+        Effective alpha value for the current step
+    """
+    # Constant schedule or no end value specified
+    if alpha_end is None or schedule == "constant":
+        return alpha_start
+    
+    # Compute progress as fraction of training completed
+    # Clamp to [0, 1] to handle edge cases
+    progress = min(max(current_step / max(total_steps, 1), 0.0), 1.0)
+    
+    if schedule == "linear":
+        # Linear interpolation from alpha_start to alpha_end
+        return alpha_start + (alpha_end - alpha_start) * progress
+    
+    elif schedule == "cosine":
+        # Cosine decay: smooth transition from alpha_start to alpha_end
+        # Uses cosine annealing formula: end + (start - end) * 0.5 * (1 + cos(pi * progress))
+        return alpha_end + (alpha_start - alpha_end) * 0.5 * (1 + math.cos(math.pi * progress))
+    
+    else:
+        # Unknown schedule, fall back to constant
+        return alpha_start
 
 PolicyLossFn = Callable[
     [
@@ -102,6 +151,9 @@ class AdvantageEstimator(str, Enum):
     OPO = "opo"
     GRPO_PASSK = "grpo_passk"
     GPG = "gpg"
+    RLOO_VECTORIZED = "rloo_vectorized"
+    GRPO_VECTORIZED = "grpo_vectorized"
+    PASSK_ANALYTICAL = "passk_analytical"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -323,6 +375,308 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_adv_est(AdvantageEstimator.GRPO_VECTORIZED)
+def compute_grpo_vectorized_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Vectorized GRPO（outcome-only）:
+      For each group g:
+      a_i = \\frac{r_i - \\mu_g}{\\sigma_g} (or without dividing by \\sigma_g),
+      then broadcast the scalar across the token dimension (multiplied by response_mask).。
+    """
+    with torch.no_grad():
+        scores = token_level_rewards.sum(dim=-1)
+        g = as_torch_index(index, device=scores.device)
+        mean_g, std_g, _ = group_mean_std(scores, g, eps=epsilon, device=scores.device)
+        if norm_adv_by_std_in_grpo:
+            scalars = (scores - mean_g[g]) / (std_g[g] + epsilon)
+        else:
+            scalars = scores - mean_g[g]
+        advantages = scalars.unsqueeze(-1) * response_mask
+        return advantages, advantages
+
+
+@register_adv_est("grpo_ds")
+@register_adv_est("gspo_ds")
+def compute_grpo_ds_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray | None = None,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    old_log_probs: torch.Tensor | None = None,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Differential Smoothing for GRPO/GSPO.
+    
+    A_i^DS = A_i + {
+        -gamma_pos * log π_old(y_i|x), if r_i > 0,
+        +gamma_neg * log π_old(y_i|x), otherwise
+    }
+    where A_i is the base GRPO-style advantage (optionally normalized within group),
+    r_i is the outcome reward (sum over tokens), and log π_old(y_i|x) is the
+    sequence log-likelihood under the "old" policy (sum of token log-probs).
+    
+    Notes:
+    - This function returns token-level advantages by broadcasting per-sequence scalars.
+    - Alias is registered as both "grpo_ds" and "gspo_ds". GSPO uses the same advantages
+      while the loss is computed with sequence-level importance ratio.
+    """
+    assert config is not None, "AlgoConfig is required for DS advantages."
+    # Base GRPO (vectorized) advantage
+    base_adv, _ = compute_grpo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=np.arange(token_level_rewards.size(0)) if index is None else index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=config.get("norm_adv_by_std_in_grpo", norm_adv_by_std_in_grpo),
+        config=config,
+    )
+
+    with torch.no_grad():
+        # Outcome per sequence
+        seq_reward = token_level_rewards.sum(dim=-1)  # (bs,)
+        is_pos = (seq_reward > 0).to(dtype=torch.bool)
+
+        # log π_old(y|x): sum of token log-probs under the rollout/old policy
+        if old_log_probs is None:
+            # If not provided, fall back to zeros (no DS smoothing)
+            seq_logp = torch.zeros_like(seq_reward)
+        else:
+            seq_logp = (old_log_probs * response_mask).sum(dim=-1)
+
+        gamma_pos = float(getattr(config, "ds_gamma_pos", 0.1))
+        gamma_neg = float(getattr(config, "ds_gamma_neg", 0.1))
+
+        # Piecewise smoothing term
+        ds_scalar = torch.where(is_pos, -gamma_pos * seq_logp, gamma_neg * seq_logp)  # (bs,)
+        ds_term = ds_scalar.unsqueeze(-1) * response_mask  # broadcast to tokens
+
+    adv = base_adv + ds_term
+    return adv, adv
+
+
+@register_adv_est("grpo_mgpo")
+@register_adv_est("gspo_mgpo")
+def compute_grpo_mgpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    MGPO (MaxEnt-Guided) variant for GRPO/GSPO: simply reweights the GRPO advantages
+    by an entropy-deviation weight computed per prompt/group.
+    
+    For each group g (prompt) with empirical correctness probability p_c:
+        D_ME(p_c || 0.5) = p_c log(p_c/0.5) + (1-p_c) log((1-p_c)/0.5)
+        w_ME = exp(-lambda * D_ME)
+    Then final advantages A'_i = w_ME * A_i for all responses i in group g.
+    
+    Correctness is inferred from the scalar rollout reward (sum over tokens): 1 if reward > 0, else 0.
+    """
+    assert config is not None, "AlgoConfig is required for MGPO."
+    lambda_me = getattr(config, "mgpo_lambda", 3.0)
+    p0 = 0.5
+
+    # whether to normalize within-group by std (original GRPO) or not (Dr.GRPO)
+    norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
+
+    # 1) Base GRPO advantage (vectorized implementation)
+    base_adv, _ = compute_grpo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        config=config,
+    )
+
+    with torch.no_grad():
+        # 2) Group-wise empirical correctness probability p_c
+        scores = token_level_rewards.sum(dim=-1)  # (bs,)
+        correct = (scores > 0).to(dtype=torch.float32)  # binary indicator
+
+        g = as_torch_index(index, device=scores.device)
+        mean_g, _, _ = group_mean_std(correct, g, eps=epsilon, device=correct.device)  # mean per group = p_c
+        pc = mean_g[g].clamp(min=epsilon, max=1.0 - epsilon)
+
+        # 3) Max-entropy deviation distance and weight
+        d_me = pc * torch.log(pc / p0) + (1.0 - pc) * torch.log((1.0 - pc) / (1.0 - p0))
+        w_me = torch.exp(-lambda_me * d_me)  # (bs,)
+
+        # Broadcast to token dimension
+        w_me_tok = w_me.unsqueeze(-1) * response_mask
+
+    adv = base_adv * w_me_tok
+    return adv, adv
+
+
+@register_adv_est("grpo_lowacc")
+@register_adv_est("gspo_lowacc")
+def compute_grpo_lowacc_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config: Optional[AlgoConfig] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Low-Accuracy Upweighting (focus near p_c ≈ 0):
+      A'_i = w_lowacc(g) * A_i where w_lowacc(g) = (1 - p_c)^lambda_low, p_c = mean(correct) in group g.
+      - correct = 1 if total reward > 0 else 0
+      - lambda_low controls sharpness; larger => stronger focus on near-0 groups.
+      - If a group's rewards are all equal (e.g., all incorrect with same reward),
+        base GRPO advantages are ~0; multiplying by a large weight keeps them ~0 as desired.
+    """
+    assert config is not None, "AlgoConfig is required for low-accuracy weighting."
+    lambda_low = float(getattr(config, "lowacc_lambda", getattr(config, "mgpo_lambda", 5.0)))
+
+    # 1) Base GRPO advantage (vectorized)
+    norm_adv_by_std_in_grpo = config.get("norm_adv_by_std_in_grpo", True)
+    base_adv, _ = compute_grpo_vectorized_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        config=config,
+    )
+
+    with torch.no_grad():
+        # 2) Group-wise empirical correctness probability p_c
+        scores = token_level_rewards.sum(dim=-1)  # (bs,)
+        correct = (scores > 0).to(dtype=torch.float32)
+        g = as_torch_index(index, device=scores.device)
+        mean_g, _, _ = group_mean_std(correct, g, eps=epsilon, device=correct.device)  # mean per group = p_c
+        pc = mean_g[g].clamp(min=epsilon, max=1.0 - 1e-12)
+
+        # 3) Low-accuracy focus weight: high at p=0, decays to 0 at p=1
+        w = torch.pow((1.0 - pc), lambda_low)
+        w_tok = w.unsqueeze(-1) * response_mask
+
+    adv = base_adv * w_tok
+    return adv, adv
+
+
+@register_adv_est(AdvantageEstimator.PASSK_ANALYTICAL)
+def compute_passk_analytical_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for Pass@k using analytical derivation as described in Algorithm 3.
+    
+    This implementation follows the bootstrap sampling mechanism with analytical solution
+    for response advantages to remove variance from the sampling operation.
+    
+    Args:
+        token_level_rewards: (bs, response_length)
+        response_mask: (bs, response_length)
+        index: (bs,) → group ID per sample
+        epsilon: float for numerical stability
+        config: (AlgoConfig) algorithm settings
+        
+    Returns:
+        advantages: (bs, response_length)
+        returns: (bs, response_length)
+    """
+    from scipy.special import comb
+    
+    assert config is not None, "config must be provided for pass@k analytical advantage"
+    
+    # Get k for Pass@k metric from config
+    k = config.get("passk_k", 4)  # default to Pass@4
+    
+    # Get reward threshold to determine positive/negative responses
+    reward_threshold = config.get("passk_reward_threshold", 0.5)
+    
+    scores = token_level_rewards.sum(dim=-1)  # (bs,)
+    advantages = torch.zeros_like(scores)
+    
+    # Group responses by prompt (using index)
+    id2scores = defaultdict(list)
+    id2indices = defaultdict(list)
+    
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            idx = index[i]
+            id2scores[idx].append(scores[i])
+            id2indices[idx].append(i)
+        
+        for idx in id2scores:
+            rewards = torch.stack(id2scores[idx])  # (n_rollout,)
+            n_rollout = rewards.numel()
+            
+            if n_rollout < k:
+                raise ValueError(
+                    f"Pass@k requires at least k={k} samples per group. Got {n_rollout} for group {idx}."
+                )
+            
+            # Determine positive and negative responses
+            is_positive = rewards > reward_threshold
+            n_pos = is_positive.sum().item()
+            n_neg = n_rollout - n_pos
+            
+            # Skip groups where we can't form diverse subsets
+            # If n_pos < k, all groups would be 100% pass (trivial)
+            # If n_neg < k, all groups would be 0% pass (trivial)
+            # In these cases, the variance formula breaks down (sigma → 0)
+            if n_pos < k or n_neg < k:
+                # For trivial cases, assign small uniform advantages based on reward
+                for local_i, global_i in enumerate(id2indices[idx]):
+                    if is_positive[local_i]:
+                        advantages[global_i] = 0.0  # Small positive advantage
+                    else:
+                        advantages[global_i] = 0.0  # Small negative advantage
+                continue
+            
+            # Calculate group statistics using Eq. 11 and 12
+            # N_total^group = C(n_rollout, k)
+            n_total_groups = comb(n_rollout, k, exact=True)
+            
+            # N_neg^group = C(n_neg, k) (groups with only negative responses)
+            n_neg_groups = comb(n_neg, k, exact=True)
+            
+            # R^group = 1 - N_neg^group / N_total^group (Eq. 11)
+            r_group = 1.0 - (n_neg_groups / n_total_groups)
+            
+            # σ^group = sqrt(R^group × (1 - R^group)) (Eq. 12)
+            # Use max() to ensure minimum variance and prevent extreme advantages
+            sigma_group = max(np.sqrt(r_group * (1.0 - r_group)), 0.01)
+            
+            # Calculate advantages using Eq. 14 and 15
+            # Â_pos = (1 - R^group) / σ^group (Eq. 14)
+            adv_pos = (1.0 - r_group) / sigma_group
+            
+            # Â_neg (Eq. 15)
+            adv_neg = (1.0 - r_group - (comb(n_neg-1, k-1, exact=True) / comb(n_rollout-1, k-1, exact=True))) / sigma_group
+            
+            # Assign advantages to each response
+            for local_i, global_i in enumerate(id2indices[idx]):
+                if is_positive[local_i]:
+                    advantages[global_i] = adv_pos
+                else:
+                    advantages[global_i] = adv_neg
+    
+    # Broadcast to token dimension and apply mask
+    advantages = advantages.unsqueeze(-1) * response_mask
+    return advantages, advantages
 
 
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
@@ -683,6 +1037,44 @@ def compute_gpg_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_adv_est(AdvantageEstimator.RLOO_VECTORIZED)  # or simply: @register_adv_est("rloo_vectorized")
+def compute_rloo_vectorized_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    config: Optional[AlgoConfig] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for RLOO based on https://arxiv.org/abs/2402.14740
+
+    Args:
+        token_level_rewards: `(torch.Tensor)`
+            shape: (bs, response_length)
+        response_mask: `(torch.Tensor)`
+            shape: (bs, response_length)
+        config: (AlgoConfig) algorithm config
+
+    Returns:
+        advantages: `(torch.Tensor)`
+            shape: (bs, response_length)
+        Returns: `(torch.Tensor)`
+            shape: (bs, response_length)
+    """
+    scores = token_level_rewards.sum(dim=-1)
+
+    with torch.no_grad():
+        inv = torch.from_numpy(np.unique(index, return_inverse=True)[1]).to(scores.device)
+
+        c = torch.bincount(inv)[inv].to(scores.dtype)
+        adv = ((c * scores - torch.bincount(inv, weights=scores)[inv]) / (c - 1).clamp_min(1)) * (c > 1)
+
+        adv = adv.unsqueeze(-1) * response_mask
+
+    return adv, adv
 
 
 def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
@@ -1233,6 +1625,540 @@ def compute_policy_loss_geo_mean(
     pg_clipfrac_lower = verl_F.masked_mean((clipped * (advantages < 0)).float(), response_mask)
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+def _ent_cov_shaping(
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    pl_cfg: DictConfig | ActorConfig | None,
+    rollout_is_weights: torch.Tensor | None,
+    use_is_stats: bool,
+    alpha: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Shared Ent-Cov shaping helper with alpha dampening:
+
+    Uses the identity ΔH ≈ -η Cov(log π, A) and adjusts advantages:
+        λ = (Cov(log π, A) + ΔH_tgt / η) / (Var(log π) + ε)
+        A' = A - α * λ * (log π - E[log π])
+    
+    The alpha parameter controls the strength of entropy shaping:
+        - alpha=1.0: full shaping (original Ent-Cov behavior)
+        - alpha=0.0: no shaping (returns original advantages)
+        - alpha=0.1-0.3: gentle shaping that prevents entropy collapse without
+          significantly hurting the policy learning signal
+    
+    Args:
+        log_prob: Token-level log probabilities, shape (batch_size, seq_len)
+        advantages: Advantage estimates, shape (batch_size, seq_len)
+        response_mask: Mask for response tokens, shape (batch_size, seq_len)
+        pl_cfg: Policy loss config containing Ent-Cov hyperparameters
+        rollout_is_weights: Optional importance sampling weights
+        use_is_stats: Whether to use IS-weighted statistics
+        alpha: Strength multiplier for entropy shaping (0.0 to 1.0)
+
+    Returns:
+        shaped_adv: advantages after entropy-based shaping
+        lambda_ent: scalar λ used for shaping (for logging)
+    """
+    # Early return if alpha is zero (no shaping)
+    if alpha == 0.0:
+        return advantages, torch.tensor(0.0, device=advantages.device)
+    
+    delta_h_tgt = getattr(pl_cfg, "ent_cov_delta_h_tgt", 0.0) if pl_cfg is not None else 0.0
+    eta = getattr(pl_cfg, "ent_cov_eta", 1.0) if pl_cfg is not None else 1.0
+    lambda_clip = getattr(pl_cfg, "ent_cov_lambda_clip", 5.0) if pl_cfg is not None else 5.0
+    eps = getattr(pl_cfg, "ent_cov_eps", 1e-5) if pl_cfg is not None else 1e-5
+    cfg_use_is_stats = getattr(pl_cfg, "ent_cov_use_is_stats", False) if pl_cfg is not None else False
+    use_is_stats = use_is_stats or cfg_use_is_stats
+
+    # Treat batch statistics as constants (no gradients through moments)
+    log_prob_detached = log_prob.detach()
+    advantages_detached = advantages.detach()
+    if use_is_stats and rollout_is_weights is not None:
+        advantages_detached = advantages_detached * rollout_is_weights.detach()
+
+    lp_mean = verl_F.masked_mean(log_prob_detached, response_mask)
+    lp_centered_det = log_prob_detached - lp_mean
+    adv_mean = verl_F.masked_mean(advantages_detached, response_mask)
+
+    cov_lp_adv = verl_F.masked_mean(
+        lp_centered_det * (advantages_detached - adv_mean),
+        response_mask,
+    )
+    var_lp = verl_F.masked_mean(lp_centered_det * lp_centered_det, response_mask)
+
+    lambda_ent = (cov_lp_adv + delta_h_tgt / eta) / (var_lp + eps)
+    lambda_ent = torch.clamp(lambda_ent, min=-lambda_clip, max=lambda_clip)
+
+    # Use non-detached log_prob for shaping so gradients flow through PPO loss only
+    lp_centered = log_prob - lp_mean
+    
+    # Apply alpha dampening: A' = A - α * λ * (log π - E[log π])
+    # alpha=1.0 gives original behavior, alpha<1.0 reduces shaping strength
+    shaped_adv = advantages - alpha * lambda_ent * lp_centered
+
+    return shaped_adv, lambda_ent
+
+
+def _compute_entropy_cov_policy_loss(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str,
+    config: Optional[DictConfig | AlgoConfig],
+    rollout_is_weights: torch.Tensor | None,
+    use_is_stats: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Ent-Cov: entropy-decay alleviation via covariance-based advantage shaping (PPO-style).
+    """
+    assert config is not None
+    assert not isinstance(config, AlgoConfig)
+
+    clip_ratio = config.clip_ratio
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else clip_ratio
+
+    pl_cfg = config.policy_loss if config.policy_loss is not None else None
+
+    # basic PPO stats
+    negative_approx_kl = log_prob - old_log_prob
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+
+    # Get effective alpha: use runtime alpha if set by dp_actor, else use config value
+    # _runtime_alpha is computed in dp_actor.update_policy based on schedule and current step
+    alpha = getattr(pl_cfg, "_runtime_alpha", None) if pl_cfg is not None else None
+    if alpha is None:
+        alpha = getattr(pl_cfg, "ent_cov_alpha", 1.0) if pl_cfg is not None else 1.0
+
+    # Entropy-based shaping of advantages with alpha dampening
+    shaped_adv, lambda_ent = _ent_cov_shaping(
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        pl_cfg=pl_cfg,
+        rollout_is_weights=rollout_is_weights,
+        use_is_stats=use_is_stats,
+        alpha=alpha,
+    )
+
+    # PPO clipping with shaped advantages
+    pg_losses1 = -shaped_adv * ratio
+    pg_losses2 = -shaped_adv * torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    # Apply rollout IS weights if provided (distribution correction)
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+
+    # Expose lambda_ent for monitoring via pg_clipfrac_lower (unused otherwise)
+    pg_clipfrac_lower = lambda_ent.detach()
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+@register_policy_loss("ent_cov")
+def compute_policy_loss_ent_cov(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | AlgoConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Entropy-decay alleviation via covariance-based advantage shaping (Ent-Cov)."""
+    return _compute_entropy_cov_policy_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_log_probs,
+        use_is_stats=False,
+    )
+
+
+@register_policy_loss("ent_cov_is")
+def compute_policy_loss_ent_cov_is(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "token-mean",
+    config: Optional[DictConfig | AlgoConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Ent-Cov with IS-weighted statistics.
+
+    Uses rollout importance weights (if provided) when computing covariance/variance.
+    """
+    return _compute_entropy_cov_policy_loss(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_log_probs,
+        use_is_stats=True,
+    )
+
+
+def _compute_policy_loss_gspo_ent_cov(
+    *,
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str,
+    config: Optional[DictConfig | ActorConfig],
+    rollout_is_weights: torch.Tensor | None,
+    use_is_stats: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    GSPO version of Ent-Cov: applies entropy-based advantage shaping and then
+    uses sequence-level importance ratio as in GSPO.
+    """
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+
+    pl_cfg = config.policy_loss if config.policy_loss is not None else None
+
+    negative_approx_kl = log_prob - old_log_prob
+
+    # Get effective alpha: use runtime alpha if set by dp_actor, else use config value
+    # _runtime_alpha is computed in dp_actor.update_policy based on schedule and current step
+    alpha = getattr(pl_cfg, "_runtime_alpha", None) if pl_cfg is not None else None
+    if alpha is None:
+        alpha = getattr(pl_cfg, "ent_cov_alpha", 1.0) if pl_cfg is not None else 1.0
+
+    # Entropy-based shaping of advantages (batch-level λ) with alpha dampening
+    shaped_adv, lambda_ent = _ent_cov_shaping(
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        pl_cfg=pl_cfg,
+        rollout_is_weights=rollout_is_weights,
+        use_is_stats=use_is_stats,
+        alpha=alpha,
+    )
+
+    # GSPO sequence-level importance ratio
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+
+    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+    pg_losses1 = -shaped_adv * seq_importance_ratio
+    pg_losses2 = -shaped_adv * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    if rollout_is_weights is not None:
+        pg_losses = pg_losses * rollout_is_weights
+
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    pg_clipfrac_lower = lambda_ent.detach()
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+@register_policy_loss("gspo_ent_cov")
+def compute_policy_loss_gspo_ent_cov(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Entropy-decay alleviation for GSPO via Ent-Cov shaping."""
+    return _compute_policy_loss_gspo_ent_cov(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_log_probs,
+        use_is_stats=False,
+    )
+
+
+@register_policy_loss("gspo_ent_cov_is")
+def compute_policy_loss_gspo_ent_cov_is(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    GSPO Ent-Cov with IS-weighted statistics.
+
+    Uses rollout importance weights (if provided) when computing covariance/variance.
+    """
+    return _compute_policy_loss_gspo_ent_cov(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_is_weights=rollout_log_probs,
+        use_is_stats=True,
+    )
+
+
+@register_policy_loss("gspo_mgpo")
+def compute_policy_loss_gspo_mgpo(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Alias for GSPO loss so users can set loss_mode='gspo_mgpo'.
+    MGPO logic lives in the advantage estimator ('gspo_mgpo'/'grpo_mgpo').
+    """
+    return compute_policy_loss_gspo(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_log_probs=rollout_log_probs,
+    )
+
+
+@register_policy_loss("gspo_lowacc")
+def compute_policy_loss_gspo_lowacc(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Alias to GSPO loss so users can set loss_mode='gspo_lowacc'.
+    Weighting logic lives in advantage estimator 'gspo_lowacc'/'grpo_lowacc'.
+    """
+    return compute_policy_loss_gspo(
+        old_log_prob=old_log_prob,
+        log_prob=log_prob,
+        advantages=advantages,
+        response_mask=response_mask,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+        rollout_log_probs=rollout_log_probs,
+    )
+
+
+@register_policy_loss("gspo_clip_cov")
+def compute_policy_loss_gspo_clip_cov(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    GSPO version of Clip-Cov: apply sequence-level importance ratio with token-level
+    covariance clipping.
+
+    - Base weighting follows GSPO (sequence-level importance broadcast to tokens)
+    - Covariance-based token dropping follows Clip-Cov
+    - Aggregation is sequence-mean of token-mean as in GSPO
+    - If use_is_weighted_cov=True, computes covariance using (seq_importance_ratio * advantages)
+    """
+
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    assert config.policy_loss is not None
+
+    # GSPO clipping parameters
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+
+    # Clip-Cov parameters
+    clip_cov_ratio = config.policy_loss.clip_cov_ratio if config.policy_loss.clip_cov_ratio is not None else 0.0002
+    clip_cov_lb = config.policy_loss.clip_cov_lb if config.policy_loss.clip_cov_lb is not None else 1.0
+    clip_cov_ub = getattr(config.policy_loss, "clip_cov_ub", 5.0)
+    use_is_weighted_cov = getattr(config.policy_loss, "use_is_weighted_cov", False)
+
+    assert clip_cov_ratio > 0, "clip_cov_ratio should be larger than 0."
+
+    negative_approx_kl = log_prob - old_log_prob
+
+    # GSPO sequence-level importance ratio, broadcast to tokens (in log-space for stability)
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+    # GSPO-style clipped objective at token level
+    pg_losses1 = -advantages * seq_importance_ratio
+    pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+
+    # Identify tokens where original PPO clipping is active to exclude from cov selection
+    corr = torch.ones_like(advantages)
+    clip_by_origin = (pg_losses2 > pg_losses1) & (response_mask > 0)
+
+    # Compute covariance: use IS-weighted advantages if enabled
+    if use_is_weighted_cov:
+        # Covariance between log_prob and (seq_importance_ratio * advantages)
+        weighted_adv = seq_importance_ratio.detach() * advantages
+        cov_all = (weighted_adv - verl_F.masked_mean(weighted_adv, response_mask)) * (
+            log_prob - verl_F.masked_mean(log_prob.detach(), response_mask)
+        )
+    else:
+        # Original: covariance between log_prob and advantages
+        cov_all = (advantages - verl_F.masked_mean(advantages, response_mask)) * (
+            log_prob - verl_F.masked_mean(log_prob.detach(), response_mask)
+        )
+    
+    cov_all[response_mask == 0] = -torch.inf
+    cov_all[clip_by_origin] = -torch.inf
+
+    clip_num = max(int(clip_cov_ratio * response_mask.sum().item()), 1)
+    top_k_idx = (cov_all < clip_cov_ub) & (cov_all > clip_cov_lb) & (response_mask > 0)
+    top_k_idx = torch.nonzero(top_k_idx)
+    if len(top_k_idx) > 0:
+        perm = torch.randperm(len(top_k_idx))
+        top_k_idx = top_k_idx[perm[: min(clip_num, len(top_k_idx))]]
+    else:
+        top_k_idx = torch.empty((0, 2), device=cov_all.device, dtype=torch.long)
+
+    corr[top_k_idx[:, 0], top_k_idx[:, 1]] = 0
+    pg_clipfrac = verl_F.masked_mean((corr == 0).float(), response_mask)
+
+    # Final GSPO loss with covariance-based token masking
+    pg_losses = torch.maximum(pg_losses1, pg_losses2) * corr
+
+    if rollout_log_probs is not None:
+        pg_losses = pg_losses * rollout_log_probs
+
+    # Aggregate at sequence level per GSPO
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    # For logging consistency
+    ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
+    pg_clipfrac_lower = torch.tensor(0.0, device=pg_loss.device)
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+@register_policy_loss("gspo_kl_cov")
+def compute_policy_loss_gspo_kl_cov(
+    old_log_prob: torch.Tensor,
+    log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    loss_agg_mode: str = "seq-mean-token-mean",
+    config: Optional[DictConfig | ActorConfig] = None,
+    rollout_log_probs: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    GSPO version of KL-Cov:
+    - Base GSPO objective using sequence-level importance ratio (broadcast to tokens)
+    - Apply KL-augmented loss selectively to top-covariance tokens
+    - Aggregate with sequence-mean of token-mean
+    - If use_is_weighted_cov=True, computes covariance using (seq_importance_ratio * advantages)
+    """
+
+    assert config is not None
+    assert isinstance(config, ActorConfig)
+    assert config.policy_loss is not None
+
+    # KL-Cov parameters
+    kl_cov_ratio = config.policy_loss.kl_cov_ratio if config.policy_loss.kl_cov_ratio is not None else 0.0002
+    ppo_kl_coef = config.policy_loss.ppo_kl_coef if config.policy_loss.ppo_kl_coef is not None else 1.0
+    use_is_weighted_cov = getattr(config.policy_loss, "use_is_weighted_cov", False)
+    assert kl_cov_ratio > 0, "kl_cov_ratio should be larger than 0."
+    # GSPO clipping parameters
+    clip_ratio_low = config.clip_ratio_low if config.clip_ratio_low is not None else config.clip_ratio
+    clip_ratio_high = config.clip_ratio_high if config.clip_ratio_high is not None else config.clip_ratio
+
+    negative_approx_kl = log_prob - old_log_prob
+    abs_kl = negative_approx_kl.abs()
+
+    # GSPO sequence-level importance ratio, broadcast to tokens
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    log_seq_importance_ratio = torch.clamp(log_seq_importance_ratio, max=10.0)
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+    # Base GSPO token objective and KL-augmented variant
+    pg_losses1 = -advantages * seq_importance_ratio
+    pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+    base_pg_losses = torch.maximum(pg_losses1, pg_losses2)
+    pg_losses_kl = base_pg_losses + ppo_kl_coef * abs_kl
+    pg_losses = base_pg_losses
+
+    # Select top-covariance tokens to apply KL augmentation
+    all_valid = response_mask > 0
+    all_valid_idx = torch.nonzero(all_valid.reshape(-1), as_tuple=True)[0]
+    
+    # Compute covariance: use IS-weighted advantages if enabled
+    if use_is_weighted_cov:
+        weighted_adv = (seq_importance_ratio * advantages)[all_valid].detach().reshape(-1).cpu()
+        all_valid_adv = weighted_adv
+    else:
+        all_valid_adv = advantages[all_valid].detach().reshape(-1).cpu()
+    
+    all_valid_logp = log_prob[all_valid].detach().reshape(-1).cpu()
+
+    k = min(kl_cov_ratio, len(all_valid_adv))
+    if k != 0:
+        cov_lst_all = (all_valid_adv - all_valid_adv.mean()) * (all_valid_logp - all_valid_logp.mean())
+        k_percent_nums = max(1, int(len(cov_lst_all) * kl_cov_ratio))
+        large_cov_idxs = torch.topk(cov_lst_all, k_percent_nums, largest=True).indices
+        if len(large_cov_idxs) != 0:
+            large_cov_idxs = all_valid_idx[large_cov_idxs]
+            rows = large_cov_idxs // advantages.shape[1]
+            cols = large_cov_idxs % advantages.shape[1]
+            # replace selected tokens by KL-augmented objective
+            pg_losses[rows, cols] = pg_losses_kl[rows, cols]
+
+    if rollout_log_probs is not None:
+        pg_losses = pg_losses * rollout_log_probs
+
+    # Aggregate at sequence level per GSPO
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    # Metrics: report |KL| as in kl_cov for monitoring; clipfrac not used here
+    ppo_kl_abs = verl_F.masked_mean(negative_approx_kl.abs(), response_mask)
+    return pg_loss, torch.tensor(0.0, device=pg_loss.device), ppo_kl_abs, torch.tensor(0.0, device=pg_loss.device)
 
 
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):
