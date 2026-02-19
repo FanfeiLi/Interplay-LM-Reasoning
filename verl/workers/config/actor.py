@@ -35,12 +35,23 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'.
+        loss_mode (str): Loss function mode. Options: 'vanilla', 'gspo', 'clip_cov', 'kl_cov', 'gpg',
+            'ent_cov', 'ent_cov_is', 'gspo_ent_cov', 'gspo_ent_cov_is', 'gspo_clip_cov', 'gspo_kl_cov',
+            'gspo_mgpo', 'gspo_lowacc', 'geo_mean'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
         kl_cov_ratio (float): Ratio of tokens to be applied KL penalty for kl-cov loss.
         ppo_kl_coef (float): KL divergence penalty coefficient.
+        use_is_weighted_cov (bool): If True, compute covariance using IS-weighted advantages.
+        ent_cov_alpha (float): Strength multiplier for Ent-Cov shaping (0.0 to 1.0).
+        ent_cov_alpha_end (float): Final alpha value for scheduled decay (None means constant).
+        ent_cov_alpha_schedule (str): Schedule type for alpha: "constant", "linear", "cosine".
+        ent_cov_delta_h_tgt (float): Target entropy change for Ent-Cov.
+        ent_cov_eta (float): Learning rate proxy for Ent-Cov.
+        ent_cov_lambda_clip (float): Maximum absolute value for lambda in Ent-Cov.
+        ent_cov_eps (float): Epsilon for numerical stability in Ent-Cov.
+        ent_cov_use_is_stats (bool): Whether to use IS-weighted statistics in Ent-Cov.
     """
 
     loss_mode: str = "vanilla"
@@ -49,6 +60,16 @@ class PolicyLossConfig(BaseConfig):
     clip_cov_ub: float = 5.0
     kl_cov_ratio: float = 0.0002
     ppo_kl_coef: float = 0.1
+    use_is_weighted_cov: bool = False
+    # Ent-Cov parameters
+    ent_cov_alpha: float = 1.0
+    ent_cov_alpha_end: Optional[float] = None
+    ent_cov_alpha_schedule: str = "constant"
+    ent_cov_delta_h_tgt: float = 0.0
+    ent_cov_eta: float = 1.0
+    ent_cov_lambda_clip: float = 5.0
+    ent_cov_eps: float = 1e-5
+    ent_cov_use_is_stats: bool = False
 
 
 @dataclass
