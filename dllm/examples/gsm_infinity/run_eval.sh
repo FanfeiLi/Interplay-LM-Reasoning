@@ -1,0 +1,88 @@
+#!/bin/bash
+# =============================================================================
+# Pass@128 Evaluation Script for DLLM Models on GSM-Infinity
+# =============================================================================
+# Evaluates a trained DLLM checkpoint on composition_hf/test_small with pass@128.
+#
+# Usage:
+#   # Evaluate A2D-MDLM checkpoint
+#   bash dllm/examples/gsm_infinity/run_eval.sh \
+#       saves/gsm_infinity/a2d_mdlm_100M/checkpoint-final \
+#       mdlm \
+#       results/dllm_eval/a2d_mdlm_100M
+#
+#   # Evaluate A2D-BD3LM checkpoint
+#   bash dllm/examples/gsm_infinity/run_eval.sh \
+#       saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final \
+#       bd3lm \
+#       results/dllm_eval/a2d_bd3lm_100M
+# =============================================================================
+
+set -e
+
+# =============================================================================
+# Parse Arguments
+# =============================================================================
+MODEL_PATH="${1:?Error: Model path required as first argument}"
+SAMPLER_TYPE="${2:?Error: Sampler type required (mdlm or bd3lm)}"
+OUTPUT_DIR="${3:?Error: Output directory required as third argument}"
+
+# Optional arguments with defaults
+N_SAMPLES="${N_SAMPLES:-128}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
+STEPS="${STEPS:-256}"
+TEMPERATURE="${TEMPERATURE:-0.7}"
+
+# =============================================================================
+# Configuration
+# =============================================================================
+PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+DLLM_ROOT="${PROJECT_ROOT}/dllm"
+VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+TEST_DIR="${PROJECT_ROOT}/data/composition_hf/test_small"
+
+# =============================================================================
+# Environment Setup
+# =============================================================================
+echo "=============================================="
+echo "DLLM Pass@${N_SAMPLES} Evaluation"
+echo "=============================================="
+echo "Model: ${MODEL_PATH}"
+echo "Sampler: ${SAMPLER_TYPE}"
+echo "Output: ${OUTPUT_DIR}"
+echo "Samples/prompt: ${N_SAMPLES}"
+echo "Batch size: ${BATCH_SIZE}"
+echo "Temperature: ${TEMPERATURE}"
+echo "Steps: ${STEPS}"
+echo "=============================================="
+
+source "${VENV}"
+export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
+cd "${DLLM_ROOT}"
+
+# Resolve relative model paths
+if [[ ! "${MODEL_PATH}" = /* ]]; then
+    MODEL_PATH="${DLLM_ROOT}/${MODEL_PATH}"
+fi
+
+# =============================================================================
+# Run Evaluation
+# =============================================================================
+python examples/gsm_infinity/eval_pass128.py \
+    --model_path "${MODEL_PATH}" \
+    --sampler_type "${SAMPLER_TYPE}" \
+    --test_dir "${TEST_DIR}" \
+    --n_samples "${N_SAMPLES}" \
+    --output_dir "${OUTPUT_DIR}" \
+    --batch_size "${BATCH_SIZE}" \
+    --max_new_tokens "${MAX_NEW_TOKENS}" \
+    --steps "${STEPS}" \
+    --temperature "${TEMPERATURE}"
+
+echo ""
+echo "=============================================="
+echo "Evaluation complete!"
+echo "Results saved to: ${OUTPUT_DIR}/metrics.jsonl"
+echo "=============================================="
+
