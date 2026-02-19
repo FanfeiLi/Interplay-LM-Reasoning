@@ -1,0 +1,126 @@
+# GRPO + Reward Uncertainty Predictor (RUP) training config for Mixed dataset
+# This adds an intrinsic exploration bonus based on reward prediction error
+# Hyperparameters from paper: global batch 1024, max prompt/response 1024, 2 epochs
+
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  norm_adv_by_std_in_grpo: true
+  # Reward uncertainty predictor configuration
+  reward_uncertainty:
+    enable: true
+    mode: add_to_reward  # Add intrinsic bonus to rewards (alternative: scale_advantage)
+    feature_type: token_ids  # Use token embeddings as features
+    hidden_dim: 512  # MLP hidden dimension
+    token_embed_dim: 512  # Token embedding dimension
+    token_sample_k: 256  # Number of tokens to sample per sequence (0 = all)
+    train_max_samples: 2048  # Max samples for predictor training per step
+    train_token_embed: true  # Train the token embedding
+    lr: 1e-4  # Learning rate for predictor
+    scale: 4.8  # Bonus scaling factor
+    preserve_sign: true  # Ensure bonus doesn't flip reward sign
+    warmup_steps: 0  # No warmup
+    cooldown_steps: 0  # No cooldown
+    device: cpu  # Predictor runs on CPU (safe)
+
+data:
+  train_files:
+    - data/rl_finetune/train/mixed/mixed_200k.jsonl
+  val_files:
+    - data/composition_hf/test_small/op2-200.jsonl
+    - data/composition_hf/test_small/op3-200.jsonl
+    - data/composition_hf/test_small/op4-200.jsonl
+    - data/composition_hf/test_small/op5-200.jsonl
+    - data/composition_hf/test_small/op6-200.jsonl
+    - data/composition_hf/test_small/op7-200.jsonl
+    - data/composition_hf/test_small/op8-200.jsonl
+    - data/composition_hf/test_small/op9-200.jsonl
+    - data/composition_hf/test_small/op10-200.jsonl
+    - data/composition_hf/test_small/op11-200.jsonl
+    - data/composition_hf/test_small/op12-200.jsonl
+    - data/composition_hf/test_small/op13-200.jsonl
+    - data/composition_hf/test_small/op14-200.jsonl
+    - data/composition_hf/test_small/op17-200.jsonl
+    - data/composition_hf/test_small/op18-200.jsonl
+    - data/composition_hf/test_small/op19-200.jsonl
+    - data/composition_hf/test_small/op20-200.jsonl
+  tokenizer:
+  train_batch_size: 1024
+  max_prompt_length: 1024
+  max_response_length: 1024
+  id_max_op: 10
+  filter_overlong_prompts: true
+  truncation: error
+  custom_cls:
+    path: verl/dataset.py
+    name: CustomRLHFDataset
+
+custom_reward_function:
+  path: verl/dataset.py
+  name: compute_score
+
+actor_rollout_ref:
+  model:
+    path: /fast/pmayilvahanan/Interplay-LM-Reasoning/LLaMA-Factory/saves/gsm_infinity/pt_op2-10_10B_alltemps_20260213_233838
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+  actor:
+    optim:
+      lr: 1e-6
+    ppo_mini_batch_size: 256
+    ppo_micro_batch_size_per_gpu: 16
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    kl_loss_type: low_var_kl
+    entropy_coeff: 0.0
+    clip_ratio: 0.2
+    loss_agg_mode: seq-mean-token-mean
+    policy_loss:
+      loss_mode: vanilla
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+  rollout:
+    name: vllm
+    gpu_memory_utilization: 0.6
+    n: 8
+    tensor_model_parallel_size: 1
+    log_prob_micro_batch_size_per_gpu: 16
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    val_kwargs:
+      do_sample: true
+      n: 128
+      temperature: 0.7
+      top_p: 1.0
+      top_k: -1
+  ref:
+    log_prob_micro_batch_size_per_gpu: 16
+    fsdp_config:
+      param_offload: true
+
+trainer:
+  critic_warmup: 0
+  logger:
+    - console
+    - wandb
+    - local_json
+  project_name: gsm-infinity-rl
+  experiment_name: grpo_rup_mixed
+  default_local_dir: results/gsm_infinity_rl/grpo_rup_mixed
+  n_gpus_per_node: 8
+  nnodes: 1
+  save_freq: 20
+  test_freq: 20
+  log_val_generations: 100
+  total_epochs: 2
+
