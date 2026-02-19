@@ -1,0 +1,418 @@
+"""
+Pass@128 evaluation for diffusion language models on GSM-Infinity test_small.
+
+For each test example, generates N completions using the DLLM sampler,
+extracts answers, and computes pass@k for k in {1,2,4,8,16,32,64,128}.
+
+Usage:
+    source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+    cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
+
+    # A2D-MDLM evaluation
+    python examples/gsm_infinity/eval_pass128.py \
+        --model_path saves/gsm_infinity/a2d_mdlm_100M/checkpoint-final \
+        --sampler_type mdlm \
+        --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
+        --n_samples 128 \
+        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_mdlm_100M
+
+    # A2D-BD3LM evaluation
+    python examples/gsm_infinity/eval_pass128.py \
+        --model_path saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final \
+        --sampler_type bd3lm \
+        --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
+        --n_samples 128 \
+        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_bd3lm_100M
+"""
+
+import argparse
+import json
+import math
+import os
+import re
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Tuple
+
+import numpy as np
+import torch
+from tqdm import tqdm
+
+import dllm
+from dllm.core.samplers.mdlm import MDLMSampler, MDLMSamplerConfig
+from dllm.core.samplers.bd3lm import BD3LMSampler, BD3LMSamplerConfig
+
+
+# ============================================================================
+# Answer extraction (from verl/reward_fn.py)
+# ============================================================================
+
+def extract_answer(text: str) -> str:
+    """Extract answer from generated text."""
+    m = re.search(r"<answer>(.*?)</answer>", text, flags=re.DOTALL | re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    pos = text.lower().rfind("<answer>")
+    if pos != -1:
+        tail = text[pos + len("<answer>"):]
+        m2 = re.search(r"(.*?)(<|\n|$)", tail, flags=re.DOTALL)
+        if m2:
+            return m2.group(1).strip()
+    return ""
+
+
+def check_answer(generated_text: str, gold_answer: str) -> bool:
+    """Check if the generated answer matches the gold answer."""
+    answer = extract_answer(generated_text)
+    return answer.strip().rstrip(".") == gold_answer.strip().rstrip(".")
+
+
+# ============================================================================
+# Pass@k computation (from verl/trainer/ppo/metric_utils.py)
+# ============================================================================
+
+def compute_pass_at_k(successes: int, total: int, k: int) -> float:
+    """Compute pass@k probability using the unbiased estimator."""
+    if total <= 0 or k <= 0 or successes <= 0:
+        return 0.0
+    if total < k:
+        return 0.0
+    failures = total - successes
+    if failures < k:
+        return 1.0
+
+    failures_f = float(failures)
+    total_f = float(total)
+    idx = np.arange(k, dtype=np.float64)
+    numerators = failures_f - idx
+    denominators = total_f - idx
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratios = np.divide(numerators, denominators, out=np.ones_like(numerators))
+
+    ratios = np.where(numerators <= 0.0, 0.0, ratios)
+    ratio = float(np.clip(np.prod(ratios, dtype=np.float64), 0.0, 1.0))
+    return max(0.0, min(1.0, 1.0 - ratio))
+
+
+# ============================================================================
+# Text composition (for building prompts)
+# ============================================================================
+
+def _split_solution(sol: str) -> Tuple[str, str]:
+    if not sol:
+        return "", ""
+    if "Answer:" not in sol:
+        return sol.strip(), ""
+    pre, ans = sol.rsplit("Answer:", 1)
+    ans = ans.strip().splitlines()[0].strip().rstrip(".")
+    return pre.strip(), ans
+
+
+def build_prompt(example: dict) -> str:
+    """Build the prompt from a test example (question only, no solution)."""
+    problem = (example.get("problem") or "").strip()
+    question = (example.get("question") or "").strip()
+    pq = (problem + " " + question).strip()
+    return f"<question> {pq} </question>"
+
+
+def get_gold_answer(example: dict) -> str:
+    """Extract the gold answer from the solution field."""
+    solution = (example.get("solution") or "").strip()
+    _, answer = _split_solution(solution)
+    return answer
+
+
+# ============================================================================
+# Load test data
+# ============================================================================
+
+def load_test_data(test_dir: str, op_levels: list[int] | None = None) -> dict[int, list[dict]]:
+    """Load test examples grouped by op level."""
+    data_by_op = {}
+    test_dir = Path(test_dir)
+
+    for f in sorted(test_dir.glob("op*-*.jsonl")):
+        # Extract op level from filename like "op2-200.jsonl"
+        m = re.match(r"op(\d+)-\d+\.jsonl", f.name)
+        if not m:
+            continue
+        op = int(m.group(1))
+        if op_levels is not None and op not in op_levels:
+            continue
+
+        examples = []
+        with open(f, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    examples.append(json.loads(line))
+        data_by_op[op] = examples
+
+    return data_by_op
+
+
+# ============================================================================
+# Main evaluation
+# ============================================================================
+
+def evaluate(
+    model_path: str,
+    sampler_type: str,
+    test_dir: str,
+    n_samples: int,
+    output_dir: str,
+    batch_size: int = 16,
+    max_new_tokens: int = 1024,
+    steps: int = 256,
+    block_size_mdlm: int = 256,
+    block_size_bd3lm: int = 32,
+    temperature: float = 0.7,
+    op_levels: list[int] | None = None,
+    device: str = "cuda",
+):
+    os.makedirs(output_dir, exist_ok=True)
+
+    # --- Load model and tokenizer ---
+    print(f"Loading model from {model_path}")
+    model = dllm.utils.get_model(model_name_or_path=model_path, dtype=torch.bfloat16)
+    model = model.to(device).eval()
+    tokenizer = dllm.utils.get_tokenizer(model_name_or_path=model_path)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
+    print(f"Sampler type: {sampler_type}")
+    print(f"Temperature: {temperature}, Steps: {steps}, Max new tokens: {max_new_tokens}")
+
+    # --- Create sampler ---
+    if sampler_type == "mdlm":
+        sampler = MDLMSampler(model=model, tokenizer=tokenizer)
+        sampler_config = MDLMSamplerConfig(
+            max_new_tokens=max_new_tokens,
+            steps=steps,
+            block_size=block_size_mdlm,
+            temperature=temperature,
+            remasking="low_confidence",
+        )
+    elif sampler_type == "bd3lm":
+        sampler = BD3LMSampler(model=model, tokenizer=tokenizer)
+        sampler_config = BD3LMSamplerConfig(
+            max_new_tokens=max_new_tokens,
+            steps=steps,
+            block_size=block_size_bd3lm,
+            temperature=temperature,
+            remasking="low_confidence",
+        )
+    else:
+        raise ValueError(f"Unknown sampler type: {sampler_type}")
+
+    # --- Load test data ---
+    print(f"\nLoading test data from {test_dir}")
+    data_by_op = load_test_data(test_dir, op_levels=op_levels)
+    total_examples = sum(len(v) for v in data_by_op.values())
+    print(f"Loaded {total_examples} examples across ops: {sorted(data_by_op.keys())}")
+
+    # --- Evaluate ---
+    all_metrics = {}
+    k_values = [1, 2, 4, 8, 16, 32, 64, 128]
+    k_values = [k for k in k_values if k <= n_samples]
+
+    for op in sorted(data_by_op.keys()):
+        examples = data_by_op[op]
+        print(f"\n{'='*60}")
+        print(f"Evaluating op={op} ({len(examples)} examples, {n_samples} samples each)")
+        print(f"{'='*60}")
+
+        op_successes = []
+        op_details = []
+
+        for ex_idx, example in enumerate(tqdm(examples, desc=f"op={op}")):
+            prompt_text = build_prompt(example)
+            gold_answer = get_gold_answer(example)
+
+            # Tokenize prompt
+            prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+
+            # Generate n_samples completions in micro-batches
+            all_correct = []
+            for batch_start in range(0, n_samples, batch_size):
+                batch_end = min(batch_start + batch_size, n_samples)
+                cur_batch_size = batch_end - batch_start
+
+                # Create batch of identical prompts
+                inputs = [prompt_ids] * cur_batch_size
+
+                # Generate
+                with torch.no_grad():
+                    outputs = sampler.sample(inputs, config=sampler_config)
+                    if hasattr(outputs, "sequences"):
+                        sequences = outputs.sequences
+                    else:
+                        sequences = outputs
+
+                # Decode and check answers
+                for i in range(cur_batch_size):
+                    seq = sequences[i].tolist()
+                    # Remove prompt tokens and decode
+                    gen_ids = seq[len(prompt_ids):]
+                    # Trim at EOS
+                    eos_id = tokenizer.eos_token_id
+                    if eos_id is not None and eos_id in gen_ids:
+                        gen_ids = gen_ids[:gen_ids.index(eos_id)]
+                    # Remove mask tokens
+                    mask_id = tokenizer.mask_token_id
+                    if mask_id is not None:
+                        gen_ids = [t for t in gen_ids if t != mask_id]
+
+                    generated_text = tokenizer.decode(gen_ids, skip_special_tokens=False)
+                    correct = check_answer(generated_text, gold_answer)
+                    all_correct.append(correct)
+
+            n_correct = sum(all_correct)
+            op_successes.append((n_samples, n_correct))
+
+            # Log first few examples with details
+            if ex_idx < 3:
+                op_details.append({
+                    "prompt": prompt_text[:200],
+                    "gold_answer": gold_answer,
+                    "n_correct": n_correct,
+                    "n_samples": n_samples,
+                })
+
+        # Compute pass@k for this op level
+        op_metrics = {}
+        for k in k_values:
+            pass_k_values = [
+                compute_pass_at_k(s, n, k) for n, s in op_successes
+            ]
+            op_metrics[f"pass@{k}"] = float(np.mean(pass_k_values))
+
+        # Also compute mean reward (pass@1)
+        mean_reward = float(np.mean([s / n for n, s in op_successes]))
+        std_reward = float(np.std([s / n for n, s in op_successes]))
+
+        # Store in the format matching existing metrics
+        prefix = f"val-core/difficulty-5B/{op}/reward"
+        all_metrics[f"{prefix}/mean@{n_samples}"] = mean_reward
+        all_metrics[f"val-aux/difficulty-5B/{op}/reward/std@{n_samples}"] = std_reward
+        for k in k_values:
+            all_metrics[f"val-aux/difficulty-5B/{op}/reward/pass@{k}"] = op_metrics[f"pass@{k}"]
+
+        print(f"  op={op}: mean_reward={mean_reward:.4f}, pass@1={op_metrics.get('pass@1', 0):.4f}, "
+              f"pass@128={op_metrics.get('pass@128', 0):.4f}")
+
+        # Save per-op details
+        details_path = os.path.join(output_dir, f"details_op{op}.json")
+        with open(details_path, "w") as f:
+            json.dump({"op": op, "metrics": op_metrics, "sample_details": op_details}, f, indent=2)
+
+    # --- Save aggregate metrics ---
+    metrics_path = os.path.join(output_dir, "metrics.jsonl")
+    metrics_record = {
+        "timestamp": time.time(),
+        "log_step": 0,
+        "metrics": all_metrics,
+    }
+    with open(metrics_path, "w") as f:
+        f.write(json.dumps(metrics_record) + "\n")
+
+    print(f"\nMetrics saved to {metrics_path}")
+
+    # --- Print summary ---
+    print(f"\n{'='*60}")
+    print("SUMMARY")
+    print(f"{'='*60}")
+    for op in sorted(data_by_op.keys()):
+        p1 = all_metrics.get(f"val-aux/difficulty-5B/{op}/reward/pass@1", 0)
+        p128 = all_metrics.get(f"val-aux/difficulty-5B/{op}/reward/pass@128", 0)
+        mean = all_metrics.get(f"val-core/difficulty-5B/{op}/reward/mean@{n_samples}", 0)
+        print(f"  op={op:>2d}: mean={mean:.4f}  pass@1={p1:.4f}  pass@128={p128:.4f}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Pass@128 evaluation for diffusion LMs on GSM-Infinity"
+    )
+    parser.add_argument(
+        "--model_path", type=str, required=True,
+        help="Path to the model checkpoint",
+    )
+    parser.add_argument(
+        "--sampler_type", type=str, choices=["mdlm", "bd3lm"], required=True,
+        help="Sampler type: mdlm or bd3lm",
+    )
+    parser.add_argument(
+        "--test_dir", type=str,
+        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small",
+        help="Directory containing test JSONL files",
+    )
+    parser.add_argument(
+        "--n_samples", type=int, default=128,
+        help="Number of samples per prompt (default: 128)",
+    )
+    parser.add_argument(
+        "--output_dir", type=str, required=True,
+        help="Output directory for metrics",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=16,
+        help="Micro-batch size for generation (default: 16)",
+    )
+    parser.add_argument(
+        "--max_new_tokens", type=int, default=1024,
+        help="Maximum new tokens to generate (default: 1024)",
+    )
+    parser.add_argument(
+        "--steps", type=int, default=256,
+        help="Number of diffusion steps (default: 256)",
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=0.7,
+        help="Sampling temperature (default: 0.7)",
+    )
+    parser.add_argument(
+        "--block_size_mdlm", type=int, default=256,
+        help="Block size for MDLM sampler (default: 256)",
+    )
+    parser.add_argument(
+        "--block_size_bd3lm", type=int, default=32,
+        help="Block size for BD3LM sampler (default: 32)",
+    )
+    parser.add_argument(
+        "--op_levels", type=str, default=None,
+        help="Comma-separated op levels to evaluate (default: all in test_dir)",
+    )
+    parser.add_argument(
+        "--device", type=str, default="cuda",
+        help="Device to use (default: cuda)",
+    )
+
+    args = parser.parse_args()
+
+    op_levels = None
+    if args.op_levels:
+        op_levels = [int(x) for x in args.op_levels.split(",")]
+
+    evaluate(
+        model_path=args.model_path,
+        sampler_type=args.sampler_type,
+        test_dir=args.test_dir,
+        n_samples=args.n_samples,
+        output_dir=args.output_dir,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+        steps=args.steps,
+        block_size_mdlm=args.block_size_mdlm,
+        block_size_bd3lm=args.block_size_bd3lm,
+        temperature=args.temperature,
+        op_levels=op_levels,
+        device=args.device,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
