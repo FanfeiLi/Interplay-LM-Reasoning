@@ -477,7 +477,7 @@ def process_validation_metrics(
                 if n_resps > 1:
                     metric[f"std@{n_resps}"] = np.std(var_vals)
 
-                    ns = []
+                    ns = [1]  # Start from 1 so pass@1 is always reported
                     n = 2
                     while n < n_resps:
                         ns.append(n)
