@@ -30,6 +30,7 @@ from typing import Optional
 import numpy as np
 import ray
 import torch
+import torch.nn as nn
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -40,7 +41,7 @@ from verl.experimental.dataset.sampler import AbstractCurriculumSampler
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
-from verl.trainer.config import AlgoConfig
+from verl.trainer.config import AlgoConfig, RewardUncertaintyConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.metric_utils import (
@@ -351,6 +352,14 @@ class RayPPOTrainer:
         # kl loss control currently not suppoorted
         if self.config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
+
+        # Reward-uncertainty predictor (lives on the driver).
+        # Lazily initialized on first use when algorithm.reward_uncertainty.enable is True.
+        self._reward_uncertainty_model = None
+        self._reward_uncertainty_optim = None
+        # Optional token embedding for input_ids-based features
+        self._reward_uncertainty_token_embed = None
+        self._reward_uncertainty_token_embed_optim = None
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -781,6 +790,518 @@ class RayPPOTrainer:
                 config=self.config, worker_group=self.actor_rollout_wg, rm_wg=self.rm_wg
             )
 
+    # ---------------------------
+    # Reward-uncertainty predictor helpers
+    # ---------------------------
+    def _ensure_reward_uncertainty_model(self, feature_dim: int, device: torch.device | str):
+        """Lazily create the reward-uncertainty predictor on the driver."""
+        algo_cfg: AlgoConfig = self.config.algorithm
+        ru_cfg = getattr(algo_cfg, "reward_uncertainty", None)
+        if ru_cfg is None or not getattr(ru_cfg, "enable", False):
+            return None
+
+        if self._reward_uncertainty_model is None:
+            # Support either:
+            #  - hidden_dim: int (single hidden layer, legacy)
+            #  - hidden_dims: [h1, h2, ...] (multi-layer)
+            hidden_dims_cfg = getattr(ru_cfg, "hidden_dims", None)
+            if hidden_dims_cfg is not None and len(hidden_dims_cfg) > 0:
+                hidden_dims = list(hidden_dims_cfg)
+            else:
+                hidden_dims = [int(getattr(ru_cfg, "hidden_dim", 64))]
+
+            layers = []
+            in_dim = int(feature_dim)
+            for h in hidden_dims:
+                layers.append(nn.Linear(in_dim, h))
+                layers.append(nn.ReLU())
+                in_dim = h
+            layers.append(nn.Linear(in_dim, 1))
+            model = nn.Sequential(*layers)
+            model.to(device)
+            lr = float(getattr(ru_cfg, "lr", 1e-3))
+            optim = torch.optim.Adam(model.parameters(), lr=lr)
+            self._reward_uncertainty_model = model
+            self._reward_uncertainty_optim = optim
+
+        return self._reward_uncertainty_model
+
+    def _ensure_reward_uncertainty_token_embed(
+        self,
+        device: torch.device | str,
+        embed_dim: int,
+        min_num_embeddings: int | None = None,
+    ) -> nn.EmbeddingBag:
+        """Lazily create or resize the token embedding bag for reward-uncertainty predictor."""
+        # Determine vocab size from tokenizer
+        tokenizer_size = getattr(self.tokenizer, "__len__", lambda: 0)()
+        vocab_size_attr = getattr(self.tokenizer, "vocab_size", None)
+        candidates = [x for x in [tokenizer_size, vocab_size_attr] if isinstance(x, int) and x > 0]
+        if not candidates:
+            raise ValueError("Unable to determine tokenizer size for reward_uncertainty token embedding.")
+
+        desired = max(candidates)
+        if min_num_embeddings is not None and min_num_embeddings > desired:
+            desired = min_num_embeddings
+
+        embed_dim = int(embed_dim)
+
+        if self._reward_uncertainty_token_embed is None:
+            embed = nn.EmbeddingBag(
+                num_embeddings=desired,
+                embedding_dim=embed_dim,
+                mode="mean",
+                sparse=True,
+            ).to(device)
+            self._reward_uncertainty_token_embed = embed
+            return embed
+
+        embed = self._reward_uncertainty_token_embed
+        # Rebuild if shape changed (e.g., embed_dim override)
+        if embed.num_embeddings != desired or embed.embedding_dim != embed_dim:
+            new_embed = nn.EmbeddingBag(
+                num_embeddings=desired,
+                embedding_dim=embed_dim,
+                mode="mean",
+                sparse=True,
+            ).to(device)
+            # Copy weights if possible
+            with torch.no_grad():
+                n_copy = min(embed.weight.size(0), new_embed.weight.size(0))
+                d_copy = min(embed.weight.size(1), new_embed.weight.size(1))
+                new_embed.weight[:n_copy, :d_copy].copy_(embed.weight[:n_copy, :d_copy])
+            self._reward_uncertainty_token_embed = new_embed
+            self._reward_uncertainty_token_embed_optim = None
+            embed = new_embed
+
+        return embed
+
+    def _compute_reward_prediction_uncertainty(self, batch: DataProto, reward_tensor: torch.Tensor) -> dict:
+        """Train the reward predictor and cache per-sequence uncertainty.
+
+        Feature options (algorithm.reward_uncertainty.feature_type):
+          - token_ids (default): pooled token embedding over input_ids (prompt + response),
+            computed efficiently via EmbeddingBag with deterministic token subsampling.
+          - logprob_traj / mean_logprob / last_token_logprob / logprob_stats: features derived
+            from old_log_probs on the response tokens.
+
+        The training target is the scalar outcome reward per sequence (sum over response tokens).
+        """
+        algo_cfg: AlgoConfig = self.config.algorithm
+        ru_cfg = getattr(algo_cfg, "reward_uncertainty", None)
+        if ru_cfg is None or not getattr(ru_cfg, "enable", False):
+            return {}
+
+        if "response_mask" not in batch.batch:
+            return {}
+
+        response_mask: torch.Tensor = batch.batch["response_mask"]
+        # Device for the predictor: "cpu" (default, safe), "cuda" (faster), or "auto".
+        device_cfg = str(getattr(ru_cfg, "device", "cpu"))
+        if device_cfg in ("auto", "cuda"):
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            device = torch.device("cpu")
+        response_mask = response_mask.to(device)
+
+        # Outcome reward per sequence (before any KL penalty or UCB bonus)
+        with torch.no_grad():
+            seq_reward = (reward_tensor.to(device) * response_mask).sum(dim=-1)  # (bs,)
+
+        feature_type = getattr(ru_cfg, "feature_type", "token_ids")
+
+        # ------------------
+        # 1) Train predictor (optionally on a subsample)
+        # ------------------
+        bs = int(seq_reward.shape[0])
+        train_max = int(getattr(ru_cfg, "train_max_samples", 0) or 0)
+        if train_max > 0 and train_max < bs:
+            train_idx = torch.randperm(bs, device=device)[:train_max]
+        else:
+            train_idx = None
+
+        feats_train = None
+        feats_full = None
+
+        if feature_type == "token_ids":
+            # Use tokenized input_ids (prompt + response) as representation.
+            input_ids = batch.batch.get("input_ids", None)
+            attention_mask = batch.batch.get("attention_mask", None)
+            if input_ids is None or attention_mask is None:
+                return {}
+
+            embed_dim = int(getattr(ru_cfg, "token_embed_dim", getattr(ru_cfg, "hidden_dim", 64)))
+            token_sample_k = int(getattr(ru_cfg, "token_sample_k", 256))
+            token_sample_k = max(int(token_sample_k), 0)
+
+            token_embed = self._ensure_reward_uncertainty_token_embed(device=device, embed_dim=embed_dim)
+
+            # Optional: train token embedding (sparse optimizer). Default off for low overhead.
+            train_token_embed = bool(getattr(ru_cfg, "train_token_embed", False))
+            if train_token_embed and self._reward_uncertainty_token_embed_optim is None:
+                lr_te = float(getattr(ru_cfg, "lr", 1e-3))
+                self._reward_uncertainty_token_embed_optim = torch.optim.SparseAdam(
+                    token_embed.parameters(),
+                    lr=lr_te,
+                )
+
+            # Select training subset if requested
+            if train_idx is not None:
+                input_ids_t = input_ids.index_select(0, train_idx).to(device)
+                attn_t = attention_mask.index_select(0, train_idx).to(device)
+            else:
+                input_ids_t = input_ids.to(device)
+                attn_t = attention_mask.to(device)
+
+            # Compute pooled token embedding features (train subset)
+            embed_ctx = torch.enable_grad() if train_token_embed else torch.no_grad()
+            with embed_ctx:
+                if token_sample_k <= 0:
+                    # Use all valid tokens
+                    mask = attn_t.to(dtype=torch.bool)
+                    flat_ids = input_ids_t[mask]
+                    if flat_ids.numel() == 0:
+                        return {}
+                    token_embed = self._ensure_reward_uncertainty_token_embed(
+                        device=device,
+                        embed_dim=embed_dim,
+                        min_num_embeddings=int(flat_ids.max().item()) + 1,
+                    )
+                    unk_id = getattr(self.tokenizer, "unk_token_id", None)
+                    if unk_id is None or unk_id < 0 or unk_id >= token_embed.num_embeddings:
+                        unk_id = 0
+                    invalid = (flat_ids < 0) | (flat_ids >= token_embed.num_embeddings)
+                    if torch.any(invalid):
+                        flat_ids = flat_ids.clone()
+                        flat_ids[invalid] = int(unk_id)
+                    lengths = mask.sum(dim=1).to(dtype=torch.long).clamp(min=1)
+                    offsets = torch.zeros(lengths.size(0), device=device, dtype=torch.long)
+                    offsets[1:] = lengths.cumsum(dim=0)[:-1]
+                    feats_train = token_embed(flat_ids, offsets)
+                else:
+                    bs_t, seq_len_full = input_ids_t.shape
+                    attn_long = attn_t.to(dtype=torch.long)
+                    lengths = attn_long.sum(dim=1).clamp(min=1)
+                    first_valid = torch.argmax(attn_long, dim=1)
+                    pos = (torch.arange(token_sample_k, device=device, dtype=torch.float32) + 0.5).unsqueeze(0)
+                    idx_within = torch.floor(
+                        pos * lengths.to(dtype=torch.float32).unsqueeze(1) / float(token_sample_k)
+                    ).to(dtype=torch.long)
+                    idx_within = idx_within.clamp(min=0)
+                    idx = (first_valid.unsqueeze(1) + idx_within).clamp(min=0, max=seq_len_full - 1)
+                    sampled_ids = input_ids_t.gather(dim=1, index=idx)
+                    flat_ids = sampled_ids.reshape(-1)
+                    if flat_ids.numel() == 0:
+                        return {}
+                    token_embed = self._ensure_reward_uncertainty_token_embed(
+                        device=device,
+                        embed_dim=embed_dim,
+                        min_num_embeddings=int(flat_ids.max().item()) + 1,
+                    )
+                    unk_id = getattr(self.tokenizer, "unk_token_id", None)
+                    if unk_id is None or unk_id < 0 or unk_id >= token_embed.num_embeddings:
+                        unk_id = 0
+                    invalid = (flat_ids < 0) | (flat_ids >= token_embed.num_embeddings)
+                    if torch.any(invalid):
+                        flat_ids = flat_ids.clone()
+                        flat_ids[invalid] = int(unk_id)
+                    offsets = (torch.arange(bs_t, device=device, dtype=torch.long) * token_sample_k).contiguous()
+                    feats_train = token_embed(flat_ids, offsets)
+
+        else:
+            # Log-prob–based features fall back to old_log_probs
+            old_log_probs = batch.batch.get("old_log_probs", None)
+            if old_log_probs is None:
+                resp_len_full = response_mask.sum(dim=-1).clamp(min=1).to(dtype=torch.float32)
+                feats_full = resp_len_full.unsqueeze(-1)
+            else:
+                old_log_probs = old_log_probs.to(device)
+                masked_logp = old_log_probs * response_mask.to(device)
+                resp_len_full = response_mask.to(device).sum(dim=-1).clamp(min=1).to(dtype=torch.float32)
+
+                if feature_type == "logprob_traj":
+                    feats_full = masked_logp
+                elif feature_type == "mean_logprob":
+                    feats_full = (masked_logp.sum(dim=-1) / resp_len_full).unsqueeze(-1)
+                elif feature_type == "last_token_logprob":
+                    last_idx = response_mask.to(device).long().sum(dim=-1) - 1
+                    last_idx = last_idx.clamp(min=0)
+                    feats_full = old_log_probs.gather(dim=1, index=last_idx.unsqueeze(-1))
+                elif feature_type == "logprob_stats":
+                    mean_logp = masked_logp.sum(dim=-1) / resp_len_full
+                    mean_lp2 = masked_logp.pow(2).sum(dim=-1) / resp_len_full
+                    std_logp = (mean_lp2 - mean_logp.pow(2)).clamp(min=0.0).sqrt()
+                    feats_full = torch.stack([resp_len_full, mean_logp, std_logp], dim=-1)
+                else:
+                    feats_full = (masked_logp.sum(dim=-1) / resp_len_full).unsqueeze(-1)
+
+            if train_idx is not None:
+                feats_train = feats_full.index_select(0, train_idx)
+            else:
+                feats_train = feats_full
+
+        # Ensure predictor model exists
+        model = self._ensure_reward_uncertainty_model(feature_dim=int(feats_train.shape[-1]), device=device)
+        if model is None or self._reward_uncertainty_optim is None:
+            return {}
+
+        model.train()
+
+        # Get training config
+        n_updates = int(getattr(ru_cfg, "train_n_updates", 1) or 1)
+        mini_batch_size = int(getattr(ru_cfg, "train_mini_batch_size", 256) or 256)
+
+        # Prepare training data
+        if train_idx is not None:
+            target_for_training = seq_reward.index_select(0, train_idx).to(device=device, dtype=torch.float32)
+        else:
+            target_for_training = seq_reward.to(device=device, dtype=torch.float32)
+        feats_for_training = feats_train.to(device=device, dtype=torch.float32)
+
+        total_samples = feats_for_training.shape[0]
+        total_loss = 0.0
+
+        # Training loop with multiple gradient steps
+        for update_idx in range(n_updates):
+            if n_updates > 1 and total_samples > mini_batch_size:
+                mb_idx = torch.randperm(total_samples, device=device)[:mini_batch_size]
+                feats_mb = feats_for_training[mb_idx]
+                target_mb = target_for_training[mb_idx]
+            else:
+                feats_mb = feats_for_training
+                target_mb = target_for_training
+
+            pred_mb = model(feats_mb).squeeze(-1)
+            loss = 0.5 * (pred_mb - target_mb).pow(2).mean()
+            total_loss += loss.item()
+
+            # Backprop / update
+            self._reward_uncertainty_optim.zero_grad()
+            if self._reward_uncertainty_token_embed_optim is not None:
+                self._reward_uncertainty_token_embed_optim.zero_grad()
+            loss.backward()
+            self._reward_uncertainty_optim.step()
+            if self._reward_uncertainty_token_embed_optim is not None:
+                self._reward_uncertainty_token_embed_optim.step()
+
+        avg_loss = total_loss / n_updates
+
+        # ------------------
+        # 2) Compute uncertainty for full batch (no grad)
+        # ------------------
+        model.eval()
+        with torch.no_grad():
+            if feature_type == "token_ids":
+                input_ids = batch.batch.get("input_ids", None)
+                attention_mask = batch.batch.get("attention_mask", None)
+                if input_ids is None or attention_mask is None:
+                    return {}
+
+                embed_dim = int(getattr(ru_cfg, "token_embed_dim", getattr(ru_cfg, "hidden_dim", 64)))
+                token_sample_k = int(getattr(ru_cfg, "token_sample_k", 256))
+                token_sample_k = max(int(token_sample_k), 0)
+                token_embed = self._ensure_reward_uncertainty_token_embed(device=device, embed_dim=embed_dim)
+
+                input_ids_f = input_ids.to(device)
+                attn_f = attention_mask.to(device)
+                if token_sample_k <= 0:
+                    mask = attn_f.to(dtype=torch.bool)
+                    flat_ids = input_ids_f[mask]
+                    if flat_ids.numel() == 0:
+                        return {}
+                    token_embed = self._ensure_reward_uncertainty_token_embed(
+                        device=device,
+                        embed_dim=embed_dim,
+                        min_num_embeddings=int(flat_ids.max().item()) + 1,
+                    )
+                    unk_id = getattr(self.tokenizer, "unk_token_id", None)
+                    if unk_id is None or unk_id < 0 or unk_id >= token_embed.num_embeddings:
+                        unk_id = 0
+                    invalid = (flat_ids < 0) | (flat_ids >= token_embed.num_embeddings)
+                    if torch.any(invalid):
+                        flat_ids = flat_ids.clone()
+                        flat_ids[invalid] = int(unk_id)
+                    lengths = mask.sum(dim=1).to(dtype=torch.long).clamp(min=1)
+                    offsets = torch.zeros(lengths.size(0), device=device, dtype=torch.long)
+                    offsets[1:] = lengths.cumsum(dim=0)[:-1]
+                    feats_full = token_embed(flat_ids, offsets)
+                else:
+                    bs_f, seq_len_full = input_ids_f.shape
+                    attn_long = attn_f.to(dtype=torch.long)
+                    lengths = attn_long.sum(dim=1).clamp(min=1)
+                    first_valid = torch.argmax(attn_long, dim=1)
+                    pos = (torch.arange(token_sample_k, device=device, dtype=torch.float32) + 0.5).unsqueeze(0)
+                    idx_within = torch.floor(pos * lengths.to(dtype=torch.float32).unsqueeze(1) / float(token_sample_k)).to(
+                        dtype=torch.long
+                    )
+                    idx_within = idx_within.clamp(min=0)
+                    idx = (first_valid.unsqueeze(1) + idx_within).clamp(min=0, max=seq_len_full - 1)
+                    sampled_ids = input_ids_f.gather(dim=1, index=idx)
+                    flat_ids = sampled_ids.reshape(-1)
+                    if flat_ids.numel() == 0:
+                        return {}
+                    token_embed = self._ensure_reward_uncertainty_token_embed(
+                        device=device,
+                        embed_dim=embed_dim,
+                        min_num_embeddings=int(flat_ids.max().item()) + 1,
+                    )
+                    unk_id = getattr(self.tokenizer, "unk_token_id", None)
+                    if unk_id is None or unk_id < 0 or unk_id >= token_embed.num_embeddings:
+                        unk_id = 0
+                    invalid = (flat_ids < 0) | (flat_ids >= token_embed.num_embeddings)
+                    if torch.any(invalid):
+                        flat_ids = flat_ids.clone()
+                        flat_ids[invalid] = int(unk_id)
+                    offsets = (torch.arange(bs_f, device=device, dtype=torch.long) * token_sample_k).contiguous()
+                    feats_full = token_embed(flat_ids, offsets)
+            else:
+                # Reuse feats_full computed above when possible
+                if feats_full is None:
+                    feats_full = feats_train  # fallback
+
+            pred_all = model(feats_full.to(dtype=torch.float32)).squeeze(-1)
+            error = (seq_reward.to(device=device, dtype=torch.float32) - pred_all)
+            uncertainty = error.abs()
+            batch.batch["reward_uncertainty"] = uncertainty.detach().to("cpu")
+
+        metrics = {
+            "explore/reward_uncertainty/mse": float(avg_loss),
+            "explore/reward_uncertainty/mean_uncertainty": float(uncertainty.mean().detach().cpu().item()),
+            "explore/reward_uncertainty/feature_type": str(feature_type),
+            "explore/reward_uncertainty/train_n": int(total_samples),
+        }
+
+        return metrics
+
+    def _apply_reward_uncertainty_to_rewards(self, batch: DataProto) -> dict:
+        """Optionally add an intrinsic bonus to rewards based on prediction error."""
+        algo_cfg: AlgoConfig = self.config.algorithm
+        ru_cfg = getattr(algo_cfg, "reward_uncertainty", None)
+        if ru_cfg is None or not getattr(ru_cfg, "enable", False):
+            return {}
+
+        # Warmup: do not apply uncertainty shaping during the first N PPO steps.
+        try:
+            warmup_steps = int(getattr(ru_cfg, "warmup_steps", 0) or 0)
+        except Exception:
+            warmup_steps = 0
+        current_step = getattr(self, "global_steps", 0)
+        if warmup_steps > 0 and current_step <= warmup_steps:
+            return {"explore/reward_uncertainty/warmup_active": 1.0}
+
+        # Cooldown: stop applying uncertainty shaping after N PPO steps.
+        try:
+            cooldown_steps = int(getattr(ru_cfg, "cooldown_steps", 0) or 0)
+        except Exception:
+            cooldown_steps = 0
+        if cooldown_steps > 0 and current_step > cooldown_steps:
+            return {"explore/reward_uncertainty/cooldown_active": 1.0}
+
+        mode = getattr(ru_cfg, "mode", "add_to_reward")
+        if mode != "add_to_reward":
+            return {}
+
+        if "reward_uncertainty" not in batch.batch or "token_level_rewards" not in batch.batch:
+            return {}
+
+        token_level_rewards: torch.Tensor = batch.batch["token_level_rewards"]
+        response_mask: torch.Tensor = batch.batch["response_mask"]
+        uncertainty: torch.Tensor = batch.batch["reward_uncertainty"].to(token_level_rewards.device)
+
+        with torch.no_grad():
+            seq_reward = (token_level_rewards * response_mask).sum(dim=-1)
+            bonus_scale = float(getattr(ru_cfg, "scale", 0.5))
+            preserve_sign = bool(getattr(ru_cfg, "preserve_sign", True))
+
+            # Intrinsic bonus is based on absolute reward prediction error (curiosity-style).
+            bonus = bonus_scale * uncertainty  # (bs,)
+
+            # Never apply bonus to aborted samples (no response tokens).
+            resp_len = response_mask.sum(dim=-1).to(dtype=torch.long)  # (bs,)
+            has_resp = resp_len > 0
+            bonus = bonus * has_resp.to(dtype=bonus.dtype)
+            if preserve_sign:
+                # Clamp the bonus magnitude so the *total* shaped sequence reward
+                # r_total = seq_reward + bonus does not cross zero.
+                boundary = (-seq_reward).to(dtype=bonus.dtype)
+                eps = torch.finfo(boundary.dtype).eps
+                margin = eps * boundary.abs().clamp(min=1.0)
+                safe_boundary = torch.where(
+                    boundary >= 0,
+                    (boundary - margin).clamp(min=0.0),
+                    (boundary + margin).clamp(max=0.0),
+                )
+                pos = seq_reward > 0
+                neg = seq_reward < 0
+                zero = seq_reward == 0
+
+                bonus = torch.where(neg & (bonus >= boundary), safe_boundary, bonus)
+                bonus = torch.where(pos & (bonus <= boundary), safe_boundary, bonus)
+                bonus = torch.where(zero, torch.zeros_like(bonus), bonus)
+
+            # Cache per-sequence bonus for metrics
+            batch.batch["reward_uncertainty_bonus"] = bonus.detach().to("cpu")
+
+            # Apply the bonus as a terminal reward on the final response token
+            last_idx = (resp_len - 1).clamp(min=0)
+            token_bonus = torch.zeros_like(token_level_rewards)
+            if has_resp.any():
+                arange = torch.arange(token_level_rewards.size(0), device=token_level_rewards.device)
+                token_bonus[arange[has_resp], last_idx[has_resp]] = bonus[has_resp].to(dtype=token_level_rewards.dtype)
+            batch.batch["token_level_rewards"] = token_level_rewards + token_bonus
+
+        return {
+            "explore/reward_uncertainty/bonus_mean": float(bonus.mean().detach().cpu().item()),
+        }
+
+    def _apply_reward_uncertainty_to_advantages(self, batch: DataProto) -> dict:
+        """Optionally scale advantages based on reward prediction uncertainty."""
+        algo_cfg: AlgoConfig = self.config.algorithm
+        ru_cfg = getattr(algo_cfg, "reward_uncertainty", None)
+        if ru_cfg is None or not getattr(ru_cfg, "enable", False):
+            return {}
+
+        # Warmup: do not apply uncertainty shaping during the first N PPO steps.
+        try:
+            warmup_steps = int(getattr(ru_cfg, "warmup_steps", 0) or 0)
+        except Exception:
+            warmup_steps = 0
+        if warmup_steps > 0 and getattr(self, "global_steps", 0) <= warmup_steps:
+            return {"explore/reward_uncertainty/warmup_active": 1.0}
+
+        mode = getattr(ru_cfg, "mode", "add_to_reward")
+        if mode != "scale_advantage":
+            return {}
+
+        if "reward_uncertainty" not in batch.batch or "advantages" not in batch.batch:
+            return {}
+
+        advantages: torch.Tensor = batch.batch["advantages"]
+        response_mask: torch.Tensor = batch.batch["response_mask"]
+        uncertainty: torch.Tensor = batch.batch["reward_uncertainty"].to(advantages.device)
+
+        with torch.no_grad():
+            if torch.all(uncertainty <= 0):
+                return {}
+
+            scale = float(getattr(ru_cfg, "scale", 0.5))
+            max_scale = float(getattr(ru_cfg, "max_scale", 3.0))
+
+            u_mean = uncertainty.mean()
+            u_norm = uncertainty / (u_mean + 1e-6)
+            # Factor is >= 0 so the sign of advantages is preserved.
+            factor = 1.0 + scale * (u_norm - 1.0)
+            factor = torch.clamp(factor, min=0.0, max=max_scale)
+            factor = factor.unsqueeze(-1)  # (bs, 1)
+
+            batch.batch["advantages"] = advantages * factor
+
+        return {
+            "explore/reward_uncertainty/scale_mean": float(factor[response_mask.bool()].mean().detach().cpu().item())
+            if response_mask.any()
+            else float(factor.mean().detach().cpu().item()),
+        }
+
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
 
@@ -1117,6 +1638,11 @@ class RayPPOTrainer:
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
+                        # Train reward predictor and cache uncertainty (sequence-level).
+                        ru_pred_metrics = self._compute_reward_prediction_uncertainty(batch, reward_tensor)
+                        if ru_pred_metrics:
+                            metrics.update(ru_pred_metrics)
+
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
                             batch, kl_metrics = apply_kl_penalty(
@@ -1125,6 +1651,11 @@ class RayPPOTrainer:
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                        # Optionally add an intrinsic bonus to rewards based on uncertainty.
+                        ru_reward_metrics = self._apply_reward_uncertainty_to_rewards(batch)
+                        if ru_reward_metrics:
+                            metrics.update(ru_reward_metrics)
 
                         # compute advantages, executed on the driver process
 
@@ -1141,6 +1672,11 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+
+                        # Optionally scale advantages based on reward prediction uncertainty.
+                        ru_adv_metrics = self._apply_reward_uncertainty_to_advantages(batch)
+                        if ru_adv_metrics:
+                            metrics.update(ru_adv_metrics)
 
                     # update critic
                     if self.use_critic:
