@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+
+# Data and checkpoints (too large)
+data/
+checkpoints/
+*.pt
+*.safetensors
+*.bin
+*.ckpt
+
+# Results (checkpoints are too large)
+results/
+
+# WandB
+wandb/
+
+# verl_custom (ignored per user request)
+verl_custom/
+
+# Logs
+*.log
+main_ppo.log
+
+# gsm_pretrain
+gsm_pretrain/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
