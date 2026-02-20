@@ -3,13 +3,10 @@ Preprocess GSM-Infinity composition_hf JSONL data into a pre-tokenized
 HuggingFace dataset ready for dLLM pre-training.
 
 Pipeline:
-  1. Stream JSONL shards for op 2-10
+  1. Read JSONL shards for op 2-10 in parallel (one process per shard)
   2. Convert each example to text via compose_text()
-  3. Tokenize all text and concatenate into fixed-length (2048) sequences
-  4. Save as Arrow dataset with input_ids + labels columns
-
-This means the training script can load with load_preprocessed_data=True
-and skip the expensive tokenization step entirely.
+  3. Tokenize in batches and concatenate into fixed-length (2048) sequences
+  4. Merge chunks from all workers and save as Arrow dataset
 
 Usage:
     source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
@@ -19,15 +16,15 @@ Usage:
         --data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train \
         --tokenizer_path /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M \
         --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized \
-        --op_min 2 --op_max 10
+        --op_min 2 --op_max 10 --num_workers 16
 """
 
 import argparse
 import json
 import os
 import sys
-from itertools import chain
-from pathlib import Path
+import time
+from multiprocessing import Pool
 from typing import Tuple
 
 import transformers
@@ -38,7 +35,6 @@ from tqdm import tqdm
 # ---------- Text composition (from utils/text_preprocess.py) ----------
 
 def _split_solution(sol: str) -> Tuple[str, str]:
-    """Split solution text into body and answer parts based on 'Answer:' marker."""
     if not sol:
         return "", ""
     if "Answer:" not in sol:
@@ -48,32 +44,94 @@ def _split_solution(sol: str) -> Tuple[str, str]:
     return pre.strip(), ans
 
 
-def compose_text(obj: dict, add_special_tokens: bool = True) -> str:
-    """Compose a training text string from a raw example."""
+def compose_text(obj: dict) -> str:
     problem = (obj.get("problem") or "").strip()
     question = (obj.get("question") or "").strip()
     solution = (obj.get("solution") or "").strip()
-
-    if add_special_tokens and (problem or question or solution):
-        sol_body, answer = _split_solution(solution)
-        pq = (problem + " " + question).strip()
-        parts = []
-        if pq:
-            parts.extend(["<question>", pq, "</question>"])
-        if sol_body:
-            parts.extend(["<solution>", sol_body, "</solution>"])
-        if answer:
-            parts.extend(["<answer>", answer, "</answer>"])
-        text = " ".join([p for p in parts if p]).strip()
-        if text:
-            return text
-    return ""
+    if not (problem or question or solution):
+        return ""
+    sol_body, answer = _split_solution(solution)
+    pq = (problem + " " + question).strip()
+    parts = []
+    if pq:
+        parts.extend(["<question>", pq, "</question>"])
+    if sol_body:
+        parts.extend(["<solution>", sol_body, "</solution>"])
+    if answer:
+        parts.extend(["<answer>", answer, "</answer>"])
+    return " ".join(parts)
 
 
-# ---------- Main preprocessing ----------
+# ---------- Per-shard worker ----------
+
+# Global tokenizer (set once per worker via initializer)
+_worker_tokenizer = None
+_worker_seq_length = None
+
+
+def _init_worker(tokenizer_path: str, seq_length: int):
+    global _worker_tokenizer, _worker_seq_length
+    _worker_tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path)
+    _worker_seq_length = seq_length
+
+
+def _process_one_shard(shard_path: str) -> list[list[int]]:
+    """Process a single shard: read JSONL -> compose text -> tokenize -> chunk."""
+    tokenizer = _worker_tokenizer
+    seq_length = _worker_seq_length
+    eos_id = tokenizer.eos_token_id
+
+    token_buffer = []
+    chunks = []
+    batch_size = 5_000
+    texts_batch = []
+    n_examples = 0
+
+    with open(shard_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = compose_text(obj)
+            if not text:
+                continue
+
+            texts_batch.append(text)
+            n_examples += 1
+
+            if len(texts_batch) >= batch_size:
+                _tokenize_batch(texts_batch, tokenizer, eos_id,
+                                token_buffer, chunks, seq_length)
+                texts_batch = []
+
+    if texts_batch:
+        _tokenize_batch(texts_batch, tokenizer, eos_id,
+                        token_buffer, chunks, seq_length)
+
+    shard_name = os.path.basename(shard_path)
+    print(f"  [{shard_name}] {n_examples:,} examples -> {len(chunks):,} chunks "
+          f"({len(token_buffer):,} leftover tokens)")
+    return chunks
+
+
+def _tokenize_batch(texts, tokenizer, eos_id, token_buffer, chunks, seq_length):
+    encoded = tokenizer(texts, add_special_tokens=False)["input_ids"]
+    for ids in encoded:
+        token_buffer.extend(ids)
+        if eos_id is not None and (not ids or ids[-1] != eos_id):
+            token_buffer.append(eos_id)
+    while len(token_buffer) >= seq_length:
+        chunks.append(token_buffer[:seq_length])
+        del token_buffer[:seq_length]
+
+
+# ---------- Shard discovery ----------
 
 def find_jsonl_shards(data_dir: str, op_min: int, op_max: int) -> list[str]:
-    """Find all JSONL shard files for op levels in [op_min, op_max]."""
     shard_files = []
     for op in range(op_min, op_max + 1):
         op_dir = os.path.join(data_dir, str(op))
@@ -86,83 +144,7 @@ def find_jsonl_shards(data_dir: str, op_min: int, op_max: int) -> list[str]:
     return shard_files
 
 
-def tokenize_and_chunk_shards(
-    shard_files: list[str],
-    tokenizer: transformers.PreTrainedTokenizer,
-    seq_length: int = 2048,
-    batch_size: int = 10_000,
-) -> list[list[int]]:
-    """Read shards, tokenize, concatenate, and chunk into fixed-length sequences.
-
-    Processes in streaming batches to manage memory.
-    Returns list of token-id lists, each of length seq_length.
-    """
-    eos_id = tokenizer.eos_token_id
-    all_chunks = []
-    token_buffer = []
-
-    total_examples = 0
-    total_tokens = 0
-
-    for shard_path in tqdm(shard_files, desc="Processing shards"):
-        texts_batch = []
-        with open(shard_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                text = compose_text(obj, add_special_tokens=True)
-                if not text:
-                    continue
-
-                texts_batch.append(text)
-                total_examples += 1
-
-                if len(texts_batch) >= batch_size:
-                    _flush_batch(texts_batch, tokenizer, eos_id, token_buffer,
-                                 all_chunks, seq_length)
-                    total_tokens += len(texts_batch) * 50  # rough estimate
-                    texts_batch = []
-
-        # Flush remaining in shard
-        if texts_batch:
-            _flush_batch(texts_batch, tokenizer, eos_id, token_buffer,
-                         all_chunks, seq_length)
-            texts_batch = []
-
-    # Final partial chunk is dropped (standard PT practice)
-    print(f"  Total examples processed: {total_examples:,}")
-    print(f"  Total chunks (seq_length={seq_length}): {len(all_chunks):,}")
-    print(f"  Leftover tokens dropped: {len(token_buffer):,}")
-
-    return all_chunks
-
-
-def _flush_batch(
-    texts: list[str],
-    tokenizer: transformers.PreTrainedTokenizer,
-    eos_id: int,
-    token_buffer: list[int],
-    all_chunks: list[list[int]],
-    seq_length: int,
-):
-    """Tokenize a batch of texts, append to buffer, and extract full chunks."""
-    encoded = tokenizer(texts, add_special_tokens=False)["input_ids"]
-    for ids in encoded:
-        token_buffer.extend(ids)
-        if eos_id is not None and (not ids or ids[-1] != eos_id):
-            token_buffer.append(eos_id)
-
-    # Extract full chunks
-    while len(token_buffer) >= seq_length:
-        chunk = token_buffer[:seq_length]
-        all_chunks.append(chunk)
-        del token_buffer[:seq_length]
-
+# ---------- Main ----------
 
 def main():
     parser = argparse.ArgumentParser(
@@ -183,10 +165,11 @@ def main():
     parser.add_argument("--op_min", type=int, default=2)
     parser.add_argument("--op_max", type=int, default=10)
     parser.add_argument("--seq_length", type=int, default=2048)
-    parser.add_argument("--test_split_size", type=int, default=5000,
-                        help="Number of chunks for the test split")
+    parser.add_argument("--test_split_size", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num_proc", type=int, default=16,
+    parser.add_argument("--num_workers", type=int, default=16,
+                        help="Number of parallel workers for processing shards")
+    parser.add_argument("--num_proc_save", type=int, default=16,
                         help="Processes for saving to disk")
     args = parser.parse_args()
 
@@ -195,30 +178,48 @@ def main():
     print(f"Output dir:     {args.output_dir}")
     print(f"Op range:       {args.op_min}-{args.op_max}")
     print(f"Seq length:     {args.seq_length}")
+    print(f"Workers:        {args.num_workers}")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # --- Load tokenizer ---
+    # Verify tokenizer loads
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
     print(f"Tokenizer vocab_size={tokenizer.vocab_size}, "
-          f"eos={tokenizer.eos_token}({tokenizer.eos_token_id})")
+          f"eos={tokenizer.eos_token}({tokenizer.eos_token_id})\n")
 
     # --- Find shards ---
     shard_files = find_jsonl_shards(args.data_dir, args.op_min, args.op_max)
-    print(f"Found {len(shard_files)} shard files\n")
+    print(f"Found {len(shard_files)} shard files")
     if not shard_files:
         print("ERROR: No JSONL shard files found!")
         sys.exit(1)
 
-    # --- Tokenize + chunk ---
-    chunks = tokenize_and_chunk_shards(
-        shard_files, tokenizer, seq_length=args.seq_length,
-    )
+    # --- Process shards in parallel ---
+    t0 = time.time()
+    print(f"\nProcessing {len(shard_files)} shards with {args.num_workers} workers...")
+
+    with Pool(
+        processes=args.num_workers,
+        initializer=_init_worker,
+        initargs=(args.tokenizer_path, args.seq_length),
+    ) as pool:
+        results = pool.map(_process_one_shard, shard_files)
+
+    # Merge all chunks
+    all_chunks = []
+    for shard_chunks in results:
+        all_chunks.extend(shard_chunks)
+
+    elapsed = time.time() - t0
+    print(f"\nTokenization complete in {elapsed:.0f}s ({elapsed/60:.1f}m)")
+    print(f"Total chunks: {len(all_chunks):,} (each {args.seq_length} tokens)")
+    total_tokens = len(all_chunks) * args.seq_length
+    print(f"Total tokens:  {total_tokens:,} ({total_tokens/1e9:.2f}B)")
 
     # --- Build HF dataset ---
-    print(f"\nBuilding HuggingFace dataset from {len(chunks):,} chunks...")
+    print(f"\nBuilding HuggingFace dataset...")
     dataset = Dataset.from_dict({
-        "input_ids": chunks,
-        "labels": [c[:] for c in chunks],
+        "input_ids": all_chunks,
+        "labels": [c[:] for c in all_chunks],
     })
     dataset = dataset.shuffle(seed=args.seed)
 
@@ -233,15 +234,14 @@ def main():
 
     # --- Save ---
     print(f"Saving to {args.output_dir}...")
-    ds_dict.save_to_disk(args.output_dir, num_proc=args.num_proc)
+    ds_dict.save_to_disk(args.output_dir, num_proc=args.num_proc_save)
 
     # --- Verify ---
     print("\n--- Verification ---")
     sample = ds_dict["train"][0]
     print(f"  input_ids length: {len(sample['input_ids'])}")
-    print(f"  labels length:    {len(sample['labels'])}")
-    decoded = tokenizer.decode(sample["input_ids"][:100])
-    print(f"  First 100 tokens decoded: {decoded[:200]}...")
+    decoded = tokenizer.decode(sample["input_ids"][:80])
+    print(f"  First 80 tokens: {decoded[:300]}...")
     print(f"\nDone! Pre-tokenized dataset saved to: {args.output_dir}")
 
 
