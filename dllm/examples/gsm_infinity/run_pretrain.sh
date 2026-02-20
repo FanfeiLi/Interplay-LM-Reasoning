@@ -122,8 +122,8 @@ train_mdlm() {
         --bf16 True \
         --gradient_checkpointing True \
         --logging_steps 10 \
-        --save_steps 1000 \
-        --save_total_limit 10 \
+        --save_steps 500 \
+        --save_total_limit 25 \
         --eval_strategy "no" \
         --report_to wandb \
         --run_name "${RUN_NAME}" \
@@ -169,8 +169,8 @@ train_bd3lm() {
         --bf16 True \
         --gradient_checkpointing True \
         --logging_steps 10 \
-        --save_steps 1000 \
-        --save_total_limit 10 \
+        --save_steps 500 \
+        --save_total_limit 25 \
         --eval_strategy "no" \
         --report_to wandb \
         --run_name "${RUN_NAME}" \

@@ -88,8 +88,8 @@ class TrainingArguments(dllm.core.trainers.BD3LMConfig):
     bf16: bool = True
     # Logging
     logging_steps: int = 10
-    save_steps: int = 1000
-    save_total_limit: int = 10
+    save_steps: int = 500
+    save_total_limit: int = 25
     eval_strategy: str = "no"
     report_to: str = "wandb"
     run_name: str = "a2d_bd3lm_100M_gsm_infinity"
