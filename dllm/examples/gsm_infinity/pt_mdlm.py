@@ -55,7 +55,7 @@ class ModelArguments(dllm.utils.ModelArguments):
 @dataclass
 class DataArguments(dllm.utils.DataArguments):
     dataset_args: str = os.path.join(
-        PROJECT_ROOT, "data/composition_hf_dllm"
+        PROJECT_ROOT, "data/composition_hf_dllm_tokenized"
     )
     text_field: str = "text"
     max_length: int = 2048
@@ -125,13 +125,15 @@ def train():
             streaming=data_args.streaming,
             load_preprocessed_data=data_args.load_preprocessed_data,
         )
-        # Always tokenize if the dataset has a text column (not yet tokenized)
-        has_text_col = data_args.text_field in (
+        # If data is already tokenized (has input_ids), skip tokenization
+        col_names = (
             dataset["train"].column_names
             if hasattr(dataset["train"], "column_names")
             else []
         )
-        if has_text_col:
+        already_tokenized = "input_ids" in col_names
+        if not already_tokenized:
+            logger.info("Dataset needs tokenization — running tokenize_and_group...")
             dataset = dataset.map(
                 functools.partial(
                     dllm.utils.tokenize_and_group,
@@ -142,7 +144,7 @@ def train():
                     drop_tail=data_args.drop_tail,
                 ),
                 batched=True,
-                remove_columns=dataset["train"].column_names,
+                remove_columns=col_names,
                 **({} if data_args.streaming else {"num_proc": data_args.num_proc}),
                 **(
                     {}
@@ -150,6 +152,8 @@ def train():
                     else {"desc": "Tokenizing and grouping dataset"}
                 ),
             )
+        else:
+            logger.info("Dataset already tokenized — skipping tokenization.")
         if data_args.streaming:
             dataset = dataset.shuffle(seed=training_args.seed)
 

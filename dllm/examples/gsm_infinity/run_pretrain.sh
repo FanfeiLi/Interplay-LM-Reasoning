@@ -71,19 +71,21 @@ convert_config() {
 # =============================================================================
 preprocess() {
     echo "=============================================="
-    echo "Preprocessing composition_hf data for dLLM"
+    echo "Preprocessing + tokenizing composition_hf data for dLLM"
     echo "=============================================="
 
-    if [ -d "${PROJECT_ROOT}/data/composition_hf_dllm/train" ]; then
-        echo "Preprocessed data already exists, skipping."
+    if [ -d "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized/train" ]; then
+        echo "Pre-tokenized data already exists, skipping."
         return
     fi
 
     python examples/gsm_infinity/preprocess_data.py \
         --data_dir "${PROJECT_ROOT}/data/composition_hf/train" \
-        --output_dir "${PROJECT_ROOT}/data/composition_hf_dllm" \
+        --tokenizer_path "${DLLM_ROOT}/model_configs/a2d_qwen2_100M" \
+        --output_dir "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized" \
         --op_min 2 --op_max 10 \
-        --test_split_size 10000
+        --seq_length 2048 \
+        --test_split_size 5000
 }
 
 # =============================================================================
@@ -103,7 +105,7 @@ train_mdlm() {
         --num_processes "${NPROC}" \
         examples/gsm_infinity/pt_mdlm.py \
         --model_name_or_path "${DLLM_ROOT}/model_configs/a2d_qwen2_100M" \
-        --dataset_args "${PROJECT_ROOT}/data/composition_hf_dllm" \
+        --dataset_args "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized" \
         --load_preprocessed_data True \
         --text_field "text" \
         --max_length 2048 \
@@ -148,7 +150,7 @@ train_bd3lm() {
         --num_processes "${NPROC}" \
         examples/gsm_infinity/pt_bd3lm.py \
         --model_name_or_path "${DLLM_ROOT}/model_configs/a2d_qwen2_100M" \
-        --dataset_args "${PROJECT_ROOT}/data/composition_hf_dllm" \
+        --dataset_args "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized" \
         --load_preprocessed_data True \
         --text_field "text" \
         --max_length 2048 \
@@ -222,4 +224,5 @@ case "${COMMAND}" in
         echo "  WANDB_PROJECT Wandb project name (default: dllm-gsm-infinity)"
         ;;
 esac
+
 
