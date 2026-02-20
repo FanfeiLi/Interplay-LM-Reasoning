@@ -113,9 +113,7 @@ def train():
     if model_args.attn_implementation:
         config._attn_implementation = model_args.attn_implementation
     with dllm.utils.init_device_context_manager():
-        model = transformers.AutoModel.from_config(
-            config, dtype=torch.bfloat16, init_params=True
-        )
+        model = transformers.AutoModel.from_config(config, torch_dtype=torch.bfloat16)
 
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")

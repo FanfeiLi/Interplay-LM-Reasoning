@@ -107,9 +107,7 @@ def train():
     # Initialize model weights from scratch using the A2D config
     config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
     with dllm.utils.init_device_context_manager():
-        model = transformers.AutoModel.from_config(
-            config, dtype=torch.bfloat16, init_params=True
-        )
+        model = transformers.AutoModel.from_config(config, torch_dtype=torch.bfloat16)
 
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
