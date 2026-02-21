@@ -32,6 +32,10 @@ NPROC="${#GPU_ARRAY[@]}"
 # Accelerate config (zero2 recommended for ~100M model)
 ACCEL_CONFIG="${ACCEL_CONFIG:-zero2}"
 
+# Data budget and output path for pre-tokenized dataset
+TOKEN_BUDGET="${TOKEN_BUDGET:-10B}"
+TOKENIZED_DATA="${PROJECT_ROOT}/data/composition_hf_dllm_${TOKEN_BUDGET}"
+
 # Wandb
 export WANDB_PROJECT="${WANDB_PROJECT:-dllm-gsm-infinity}"
 
@@ -43,6 +47,9 @@ setup_env() {
     source "${VENV}"
     export PYTHONPATH="${PROJECT_ROOT}:${DLLM_ROOT}:${PYTHONPATH}"
     export CUDA_VISIBLE_DEVICES="${GPU_LIST}"
+    # HuggingFace cache on lustre (avoids home directory quota)
+    export HF_HOME="${PROJECT_ROOT}/.hf_cache"
+    export HF_DATASETS_CACHE="${PROJECT_ROOT}/.hf_cache/datasets"
     cd "${DLLM_ROOT}"
     echo "[Setup] Python: $(which python)"
     echo "[Setup] GPUs: ${GPU_LIST} (${NPROC} processes)"
@@ -67,25 +74,21 @@ convert_config() {
 }
 
 # =============================================================================
-# Step 1: Preprocess data
+# Step 1: Pre-cache tokenized data (single process, no DDP timeout issues)
 # =============================================================================
-preprocess() {
+precache() {
     echo "=============================================="
-    echo "Preprocessing + tokenizing composition_hf data for dLLM"
+    echo "Preprocessing ${TOKEN_BUDGET} tokenized data -> ${TOKENIZED_DATA}"
     echo "=============================================="
 
-    if [ -d "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized/train" ]; then
-        echo "Pre-tokenized data already exists, skipping."
-        return
-    fi
-
-    python examples/gsm_infinity/preprocess_data.py \
-        --data_dir "${PROJECT_ROOT}/data/composition_hf/train" \
+    python examples/gsm_infinity/precache_data.py \
+        --raw_data_dir "${PROJECT_ROOT}/data/composition_hf/train" \
         --tokenizer_path "${DLLM_ROOT}/model_configs/a2d_qwen2_100M" \
-        --output_dir "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized" \
+        --output_dir "${TOKENIZED_DATA}" \
+        --token_budget "${TOKEN_BUDGET}" \
         --op_min 2 --op_max 10 \
         --seq_length 2048 \
-        --test_split_size 5000
+        --num_proc 64
 }
 
 # =============================================================================
@@ -105,11 +108,9 @@ train_mdlm() {
         --num_processes "${NPROC}" \
         examples/gsm_infinity/pt_mdlm.py \
         --model_name_or_path "${DLLM_ROOT}/model_configs/a2d_qwen2_100M" \
-        --dataset_args "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized" \
+        --dataset_args "${TOKENIZED_DATA}" \
         --load_preprocessed_data True \
-        --text_field "text" \
         --max_length 2048 \
-        --streaming False \
         --insert_eos True \
         --max_steps 10000 \
         --learning_rate 1e-4 \
@@ -117,10 +118,10 @@ train_mdlm() {
         --lr_scheduler_type cosine \
         --warmup_ratio 0.05 \
         --max_grad_norm 1.0 \
-        --per_device_train_batch_size 16 \
-        --gradient_accumulation_steps 4 \
+        --per_device_train_batch_size 64 \
+        --gradient_accumulation_steps 1 \
         --bf16 True \
-        --gradient_checkpointing True \
+        --gradient_checkpointing False \
         --logging_steps 10 \
         --save_steps 500 \
         --save_total_limit 25 \
@@ -150,11 +151,9 @@ train_bd3lm() {
         --num_processes "${NPROC}" \
         examples/gsm_infinity/pt_bd3lm.py \
         --model_name_or_path "${DLLM_ROOT}/model_configs/a2d_qwen2_100M" \
-        --dataset_args "${PROJECT_ROOT}/data/composition_hf_dllm_tokenized" \
+        --dataset_args "${TOKENIZED_DATA}" \
         --load_preprocessed_data True \
-        --text_field "text" \
         --max_length 2048 \
-        --streaming False \
         --insert_eos True \
         --max_steps 10000 \
         --learning_rate 1e-4 \
@@ -162,10 +161,10 @@ train_bd3lm() {
         --lr_scheduler_type cosine \
         --warmup_ratio 0.05 \
         --max_grad_norm 1.0 \
-        --per_device_train_batch_size 8 \
-        --gradient_accumulation_steps 8 \
+        --per_device_train_batch_size 32 \
+        --gradient_accumulation_steps 2 \
         --block_size 32 \
-        --attn_implementation sdpa \
+        --attn_implementation flex_attention \
         --bf16 True \
         --gradient_checkpointing True \
         --logging_steps 10 \
@@ -187,41 +186,44 @@ COMMAND="${1:-help}"
 shift 2>/dev/null || true
 
 case "${COMMAND}" in
-    preprocess)
+    precache)
         setup_env
         convert_config
-        preprocess
+        precache
         ;;
     mdlm)
         setup_env
         convert_config
+        precache
         train_mdlm "$@"
         ;;
     bd3lm)
         setup_env
         convert_config
+        precache
         train_bd3lm "$@"
         ;;
     all)
         setup_env
         convert_config
-        preprocess
+        precache
         train_mdlm "$@"
         train_bd3lm "$@"
         ;;
     help|*)
-        echo "Usage: $0 {preprocess|mdlm|bd3lm|all} [extra_args...]"
+        echo "Usage: $0 {precache|mdlm|bd3lm|all} [extra_args...]"
         echo ""
         echo "Commands:"
-        echo "  preprocess  Preprocess composition_hf data for dLLM (run once)"
-        echo "  mdlm        Train A2D-MDLM variant"
-        echo "  bd3lm       Train A2D-BD3LM variant"
-        echo "  all         Run preprocess + both training variants"
+        echo "  precache    Pre-cache 10B tokenized data (single process, run once)"
+        echo "  mdlm        Train A2D-MDLM variant (auto-runs precache first)"
+        echo "  bd3lm       Train A2D-BD3LM variant (auto-runs precache first)"
+        echo "  all         Run precache + both training variants"
         echo ""
         echo "Environment variables:"
-        echo "  GPU_LIST      GPU IDs (default: 0,1,2,3,4,5,6,7)"
-        echo "  ACCEL_CONFIG  Accelerate config name (default: zero2)"
-        echo "  WANDB_PROJECT Wandb project name (default: dllm-gsm-infinity)"
+        echo "  GPU_LIST       GPU IDs (default: 0,1,2,3,4,5,6,7)"
+        echo "  ACCEL_CONFIG   Accelerate config name (default: zero2)"
+        echo "  TOKEN_BUDGET   Token budget (default: 10B)"
+        echo "  WANDB_PROJECT  Wandb project name (default: dllm-gsm-infinity)"
         ;;
 esac
 
