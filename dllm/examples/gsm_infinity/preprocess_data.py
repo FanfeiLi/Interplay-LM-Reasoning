@@ -10,11 +10,17 @@ Usage:
     source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
     cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
 
+    # Full run:
     python examples/gsm_infinity/preprocess_data.py \
         --data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train \
         --tokenizer_path /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M \
         --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized \
         --op_min 2 --op_max 10 --num_workers 16
+
+    # Resume from existing _tmp_shards (skip tokenization, just concat+save):
+    python examples/gsm_infinity/preprocess_data.py \
+        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized \
+        --resume --num_save_proc 16
 """
 
 import argparse
@@ -186,57 +192,65 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=16,
                         help="Parallel workers for processing shards")
+    parser.add_argument("--num_save_proc", type=int, default=16,
+                        help="Parallel workers for save_to_disk (speeds up final save)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Skip tokenization, load existing _tmp_shards and save")
     args = parser.parse_args()
 
-    print(f"Data dir:       {args.data_dir}")
-    print(f"Tokenizer:      {args.tokenizer_path}")
-    print(f"Output dir:     {args.output_dir}")
-    print(f"Op range:       {args.op_min}-{args.op_max}")
-    print(f"Seq length:     {args.seq_length}")
-    print(f"Workers:        {args.num_workers}")
     os.makedirs(args.output_dir, exist_ok=True)
-
-    # Temp dir for intermediate Arrow shards
     tmp_dir = os.path.join(args.output_dir, "_tmp_shards")
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    # Verify tokenizer
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
-    print(f"Tokenizer vocab_size={tokenizer.vocab_size}, "
-          f"eos={tokenizer.eos_token}({tokenizer.eos_token_id})\n")
-
-    # --- Find shards ---
-    shard_files = find_jsonl_shards(args.data_dir, args.op_min, args.op_max)
-    print(f"Found {len(shard_files)} shard files")
-    if not shard_files:
-        print("ERROR: No JSONL shard files found!")
-        sys.exit(1)
-
-    # --- Process shards in parallel ---
-    # Each worker writes its output to disk (Arrow), so memory stays bounded
     t0 = time.time()
-    print(f"\nProcessing {len(shard_files)} shards with {args.num_workers} workers...")
-    print("(Each worker saves to disk — low memory footprint)\n")
 
-    with Pool(
-        processes=args.num_workers,
-        initializer=_init_worker,
-        initargs=(args.tokenizer_path, args.seq_length, tmp_dir),
-    ) as pool:
-        shard_paths = list(pool.imap_unordered(_process_one_shard, shard_files))
+    # --- Tokenization phase (skip if --resume) ---
+    if args.resume:
+        print(f"Resuming from existing shards in {tmp_dir}")
+        if not os.path.isdir(tmp_dir):
+            print(f"ERROR: _tmp_shards not found at {tmp_dir}")
+            sys.exit(1)
+    else:
+        print(f"Data dir:       {args.data_dir}")
+        print(f"Tokenizer:      {args.tokenizer_path}")
+        print(f"Output dir:     {args.output_dir}")
+        print(f"Op range:       {args.op_min}-{args.op_max}")
+        print(f"Seq length:     {args.seq_length}")
+        print(f"Workers:        {args.num_workers}")
+        os.makedirs(tmp_dir, exist_ok=True)
 
-    # Filter out None (empty shards)
-    shard_paths = [p for p in shard_paths if p is not None]
+        tokenizer = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
+        print(f"Tokenizer vocab_size={tokenizer.vocab_size}, "
+              f"eos={tokenizer.eos_token}({tokenizer.eos_token_id})\n")
 
-    elapsed = time.time() - t0
-    print(f"\nTokenization complete in {elapsed:.0f}s ({elapsed/60:.1f}m)")
-    print(f"Produced {len(shard_paths)} Arrow shards on disk")
+        shard_files = find_jsonl_shards(args.data_dir, args.op_min, args.op_max)
+        print(f"Found {len(shard_files)} shard files")
+        if not shard_files:
+            print("ERROR: No JSONL shard files found!")
+            sys.exit(1)
+
+        print(f"\nProcessing {len(shard_files)} shards with {args.num_workers} workers...")
+        print("(Each worker saves to disk — low memory footprint)\n")
+
+        with Pool(
+            processes=args.num_workers,
+            initializer=_init_worker,
+            initargs=(args.tokenizer_path, args.seq_length, tmp_dir),
+        ) as pool:
+            shard_paths = list(pool.imap_unordered(_process_one_shard, shard_files))
+
+        shard_paths = [p for p in shard_paths if p is not None]
+        elapsed = time.time() - t0
+        print(f"\nTokenization complete in {elapsed:.0f}s ({elapsed/60:.1f}m)")
+        print(f"Produced {len(shard_paths)} Arrow shards on disk")
 
     # --- Concatenate Arrow shards ---
     print("\nLoading and concatenating Arrow shards...")
-    t1 = time.time()
+    shard_dirs = sorted([
+        os.path.join(tmp_dir, d)
+        for d in os.listdir(tmp_dir)
+        if os.path.isdir(os.path.join(tmp_dir, d))
+    ])
     datasets_list = []
-    for sp in tqdm(sorted(shard_paths), desc="Loading shards"):
+    for sp in tqdm(shard_dirs, desc="Loading shards"):
         datasets_list.append(load_from_disk(sp))
 
     dataset = concatenate_datasets(datasets_list)
@@ -246,11 +260,8 @@ def main():
     total_tokens = len(dataset) * args.seq_length
     print(f"Total tokens:  {total_tokens:,} ({total_tokens/1e9:.2f}B)")
 
-    # Shuffle
-    print("Shuffling...")
-    dataset = dataset.shuffle(seed=args.seed)
-
-    # Split
+    # Split (skip global shuffle — trainer handles shuffling per-epoch)
+    print("Splitting train/test...")
     if args.test_split_size > 0 and len(dataset) > args.test_split_size:
         ds_dict = dataset.train_test_split(
             test_size=args.test_split_size, seed=args.seed
@@ -260,15 +271,23 @@ def main():
 
     print(f"Splits: { {k: len(v) for k, v in ds_dict.items()} }")
 
-    # --- Save final dataset ---
-    print(f"\nSaving final dataset to {args.output_dir}...")
-    ds_dict.save_to_disk(args.output_dir)
+    # --- Save final dataset (parallel) ---
+    # Clean up any partial saves from a previous interrupted run
+    for split_name in ["train", "test"]:
+        split_dir = os.path.join(args.output_dir, split_name)
+        if os.path.isdir(split_dir):
+            shutil.rmtree(split_dir)
+
+    num_save_proc = args.num_save_proc
+    print(f"\nSaving final dataset to {args.output_dir} (num_proc={num_save_proc})...")
+    ds_dict.save_to_disk(args.output_dir, num_proc=num_save_proc)
 
     # --- Clean up temp shards ---
     print("Cleaning up temp shards...")
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # --- Verify ---
+    tokenizer = transformers.AutoTokenizer.from_pretrained(args.tokenizer_path)
     print("\n--- Verification ---")
     sample = ds_dict["train"][0]
     print(f"  input_ids length: {len(sample['input_ids'])}")
