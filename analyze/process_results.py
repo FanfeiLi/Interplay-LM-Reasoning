@@ -56,6 +56,11 @@ ALL_RUNS = [
     "dr_gspo_mgpo_edge",
     "dr_gspo_mgpo_mixed",
     "dr_gspo_mgpo_hard",
+    # DR-GSPO RUP
+    "dr_gspo_rup_id",
+    "dr_gspo_rup_edge",
+    "dr_gspo_rup_mixed",
+    "dr_gspo_rup_hard",
     # GRPO
     "grpo_id",
     "grpo_edge",
@@ -81,6 +86,11 @@ DISPLAY_NAMES = {
     "dr_gspo_mgpo_edge": "DR-GSPO-MGPO (Edge)",
     "dr_gspo_mgpo_mixed": "DR-GSPO-MGPO (Mixed)",
     "dr_gspo_mgpo_hard": "DR-GSPO-MGPO (Hard)",
+    # DR-GSPO RUP
+    "dr_gspo_rup_id": "DR-GSPO-RUP (ID)",
+    "dr_gspo_rup_edge": "DR-GSPO-RUP (Edge)",
+    "dr_gspo_rup_mixed": "DR-GSPO-RUP (Mixed)",
+    "dr_gspo_rup_hard": "DR-GSPO-RUP (Hard)",
     # GRPO
     "grpo_id": "GRPO (ID)",
     "grpo_edge": "GRPO (Edge)",
@@ -102,6 +112,10 @@ DATA_REGIMES = {
     "dr_gspo_mgpo_edge": "edge",
     "dr_gspo_mgpo_mixed": "mixed",
     "dr_gspo_mgpo_hard": "hard",
+    "dr_gspo_rup_id": "id",
+    "dr_gspo_rup_edge": "edge",
+    "dr_gspo_rup_mixed": "mixed",
+    "dr_gspo_rup_hard": "hard",
     "grpo_id": "id",
     "grpo_edge": "edge",
     "grpo_mixed": "mixed",
@@ -271,6 +285,86 @@ def summary_table(
                 row[col] = f"{pass_k_dict[k]*100:.1f}"
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+# ── Training curves: metrics across training steps ────────────────────────────
+
+def get_available_steps(run_name: str) -> list[int]:
+    """Get all steps that have pass@k metrics for a run."""
+    if run_name == "base_model_eval_pass128":
+        return [0]
+
+    run_dir = RESULTS_DIR / run_name
+    metrics_path = run_dir / "metrics.jsonl"
+    steps = []
+    with open(metrics_path) as f:
+        for line in f:
+            entry = json.loads(line)
+            m = entry.get("metrics", {})
+            if any("pass@1" in k and "val-aux" in k for k in m.keys()):
+                steps.append(entry.get("log_step"))
+    return sorted(steps)
+
+
+def get_training_curve(
+    run_name: str,
+    k: int = 1,
+    steps: Optional[list[int]] = None,
+) -> pd.DataFrame:
+    """
+    Get pass@k values across training steps for a single run.
+
+    Args:
+        run_name: Name of the run
+        k: Which pass@k to extract (default 1)
+        steps: List of steps to include (default: all available)
+
+    Returns:
+        DataFrame with columns: run, step, group, pass_at_k
+    """
+    if steps is None:
+        steps = get_available_steps(run_name)
+
+    rows = []
+    for step in steps:
+        try:
+            metrics = _load_metrics_at_step(run_name, step)
+            for group_name, ops in DIFFICULTY_GROUPS.items():
+                values = [_extract_pass_at_k(metrics, op, k) for op in ops]
+                rows.append({
+                    "run": run_name,
+                    "display_name": DISPLAY_NAMES.get(run_name, run_name),
+                    "step": step,
+                    "group": group_name,
+                    "pass_at_k": np.mean(values) * 100,
+                })
+        except Exception as e:
+            print(f"Warning: Failed to load {run_name} step {step}: {e}")
+
+    return pd.DataFrame(rows)
+
+
+def get_training_curves(
+    run_names: list[str],
+    k: int = 1,
+    steps: Optional[list[int]] = None,
+) -> pd.DataFrame:
+    """
+    Get pass@k training curves for multiple runs.
+
+    Args:
+        run_names: List of run names
+        k: Which pass@k to extract (default 1)
+        steps: List of steps to include (default: all available for each run)
+
+    Returns:
+        DataFrame with columns: run, display_name, step, group, pass_at_k
+    """
+    dfs = []
+    for run_name in run_names:
+        df = get_training_curve(run_name, k, steps)
+        dfs.append(df)
+    return pd.concat(dfs, ignore_index=True)
 
 
 if __name__ == "__main__":
