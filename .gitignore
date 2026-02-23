@@ -18,6 +18,11 @@ checkpoints/
 *.bin
 *.ckpt
 
+# Model saves and caches (too large)
+dllm/saves/
+LLaMA-Factory/saves/
+.hf_cache/
+
 # Results (checkpoints are too large)
 results/
 
