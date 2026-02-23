@@ -25,6 +25,11 @@ MASTER_PORT="${MASTER_PORT:-29500}"
 export WANDB_PROJECT="${WANDB_PROJECT:-gsm-infinity-pretrain}"
 export WANDB_RUN_NAME="${RUN_NAME}"
 
+# Skip LLaMA-Factory's strict transformers version check.
+# transformers may be newer than <=4.55.0 if dllm deps were installed;
+# pretraining is unaffected by the version delta.
+export DISABLE_VERSION_CHECK=1
+
 # =============================================================================
 # Environment Setup
 # =============================================================================
