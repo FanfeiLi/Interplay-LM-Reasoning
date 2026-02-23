@@ -29,7 +29,9 @@ except Exception:  # pragma: no cover
     sns = None
 
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+import matplotlib.ticker as mticker
+from scipy.special import ndtri as _probit_raw  # Φ⁻¹
+from scipy.special import ndtr as _probit_cdf    # Φ
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -284,6 +286,80 @@ def load_eval_runs(
     return out
 
 
+def _probit(p: np.ndarray | float) -> np.ndarray | float:
+    """Probit transform Φ⁻¹(p) with safe clipping away from 0 and 1."""
+    EPS = 1e-6
+    arr = np.asarray(p, dtype=float)
+    arr = np.clip(arr, EPS, 1.0 - EPS)
+    return _probit_raw(arr)
+
+
+def _probit_inv(z: np.ndarray | float) -> np.ndarray | float:
+    """Inverse probit: Φ(z), maps real line back to (0,1)."""
+    return _probit_cdf(np.asarray(z, dtype=float))
+
+
+# ── Probit-scale axis helpers ────────────────────────────────────────────────
+
+class _ProbitScale:
+    """Lightweight pair of (forward, inverse) for matplotlib FuncScale."""
+    @staticmethod
+    def forward(a: np.ndarray) -> np.ndarray:
+        return _probit(a)
+
+    @staticmethod
+    def inverse(a: np.ndarray) -> np.ndarray:
+        return _probit_inv(a)
+
+
+def _setup_probit_axis(
+    ax: plt.Axes,
+    *,
+    which: str = "both",
+    pct: bool = True,
+):
+    """
+    Apply probit (Φ⁻¹) scale to the given axes.
+
+    If *pct* is True the data is in [0, 100] (percentages); we divide by 100
+    before Φ⁻¹ and label ticks as percentages.  Otherwise data is in [0, 1].
+    """
+    divisor = 100.0 if pct else 1.0
+
+    def _fwd(a):
+        return _ProbitScale.forward(np.asarray(a, dtype=float) / divisor)
+
+    def _inv(a):
+        return _ProbitScale.inverse(np.asarray(a, dtype=float)) * divisor
+
+    if which in ("both", "x"):
+        ax.set_xscale("function", functions=(_fwd, _inv))
+    if which in ("both", "y"):
+        ax.set_yscale("function", functions=(_fwd, _inv))
+
+
+def _probit_ticks(
+    lo_pct: float,
+    hi_pct: float,
+    *,
+    max_ticks: int = 12,
+) -> np.ndarray:
+    """Choose nice percentage tick values that span [lo_pct, hi_pct]."""
+    candidates = np.array(
+        [1, 2, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 98, 99],
+        dtype=float,
+    )
+    inside = candidates[(candidates >= lo_pct) & (candidates <= hi_pct)]
+    if inside.size == 0:
+        return np.array([lo_pct, hi_pct])
+    if inside.size > max_ticks:
+        step = max(1, inside.size // max_ticks)
+        inside = inside[::step]
+    return inside
+
+
+# ── Main plotting function ───────────────────────────────────────────────────
+
 def plot_id_vs_ood_scatter(
     df: pd.DataFrame,
     *,
@@ -293,18 +369,23 @@ def plot_id_vs_ood_scatter(
     title_prefix: str = "",
     save_dir: Optional[Path] = None,
     dpi: int = 200,
-    loglog: bool = True,
-    value_floor: float = 1e-3,
-    value_ceiling: Optional[float] = 100.0,
-    fit_loglog: bool = True,
+    probit: bool = True,
+    fit: bool = True,
     fit_min_points: int = 3,
+    pct: bool = True,
 ):
     """
-    For each k in k_values, create a 1xN figure (one subplot per OOD group) showing:
+    For each k in k_values, create a 1xN figure (one subplot per OOD group):
       x = ID pass@k, y = OOD pass@k
-    with one color per model:
-      - scatter: checkpoints
-      - line:    log-log linear fit (if enabled)
+
+    When ``probit=True`` both axes use the probit transform Φ⁻¹ so that a
+    universal linear relation (Miller et al., "Accuracy on the Line") appears
+    as a straight line.  The fit line is an OLS in probit space.
+
+    Parameters
+    ----------
+    pct : bool
+        True if pass_at_k values are percentages (0-100); False if fractions (0-1).
     """
     if df.empty:
         raise ValueError("Empty dataframe: nothing to plot")
@@ -312,7 +393,9 @@ def plot_id_vs_ood_scatter(
     if sns is not None:
         sns.set_theme(style="ticks", context="talk")
 
-    # Pivot to wide form: one row per (model, checkpoint, k)
+    divisor = 100.0 if pct else 1.0
+    EPS_PCT = 0.01  # smallest plottable percentage (~0.01%)
+
     wide = (
         df.pivot_table(
             index=["model", "run_type", "run_name", "checkpoint", "step", "k"],
@@ -334,27 +417,25 @@ def plot_id_vs_ood_scatter(
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-    def _clip_positive(series: pd.Series) -> pd.Series:
+    def _clean(series: pd.Series) -> pd.Series:
         s = pd.to_numeric(series, errors="coerce").astype(float)
-        if loglog:
-            s = s.where(s > 0.0, np.nan)
-            if value_floor is not None and value_floor > 0:
-                s = s.clip(lower=float(value_floor))
+        s = s.clip(lower=EPS_PCT, upper=divisor * (1.0 - 1e-6))
         return s
 
-    def _fit_loglog_line(xs: np.ndarray, ys: np.ndarray):
-        if xs.size < fit_min_points or ys.size < fit_min_points:
+    def _fit_probit_line(xs_pct: np.ndarray, ys_pct: np.ndarray):
+        ok = np.isfinite(xs_pct) & np.isfinite(ys_pct)
+        xs_pct = xs_pct[ok]
+        ys_pct = ys_pct[ok]
+        if xs_pct.size < fit_min_points:
             return None
-        if not loglog:
+        px = _probit(xs_pct / divisor)
+        py = _probit(ys_pct / divisor)
+        ok2 = np.isfinite(px) & np.isfinite(py)
+        px = px[ok2]
+        py = py[ok2]
+        if px.size < fit_min_points:
             return None
-        ok = np.isfinite(xs) & np.isfinite(ys) & (xs > 0.0) & (ys > 0.0)
-        xs = xs[ok]
-        ys = ys[ok]
-        if xs.size < fit_min_points:
-            return None
-        lx = np.log10(xs)
-        ly = np.log10(ys)
-        m, b = np.polyfit(lx, ly, deg=1)
+        m, b = np.polyfit(px, py, deg=1)
         return float(m), float(b)
 
     for k in k_values:
@@ -370,21 +451,10 @@ def plot_id_vs_ood_scatter(
 
         for ax, og in zip(axes, ood_groups):
             short_og = og.split(" (", 1)[0].strip() if og else "OOD"
-            if loglog:
-                ax.set_xscale("log")
-                ax.set_yscale("log")
 
-                # Log ticks: label 1-2-5 per decade, keep the rest as unlabeled minor ticks.
-                ax.xaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
-                ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
-                ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=(3.0, 4.0, 6.0, 7.0, 8.0, 9.0)))
-                ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(3.0, 4.0, 6.0, 7.0, 8.0, 9.0)))
-                ax.xaxis.set_minor_formatter(NullFormatter())
-                ax.yaxis.set_minor_formatter(NullFormatter())
-                ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{x:g}"))
-                ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: f"{y:g}"))
+            if probit:
+                _setup_probit_axis(ax, which="both", pct=pct)
 
-            # Track bounds based on actually plotted values (per subplot)
             all_x: list[float] = []
             all_y: list[float] = []
 
@@ -392,8 +462,8 @@ def plot_id_vs_ood_scatter(
                 sub = wk[wk["model"] == m].sort_values("step")
                 if id_group not in sub.columns or og not in sub.columns:
                     continue
-                xs = _clip_positive(sub[id_group])
-                ys = _clip_positive(sub[og])
+                xs = _clean(sub[id_group])
+                ys = _clean(sub[og])
                 ok = xs.notna() & ys.notna()
                 xs = xs[ok].to_numpy(dtype=float)
                 ys = ys[ok].to_numpy(dtype=float)
@@ -403,7 +473,6 @@ def plot_id_vs_ood_scatter(
                 all_x.extend(xs.tolist())
                 all_y.extend(ys.tolist())
 
-                # Scatter checkpoints
                 ax.scatter(
                     xs,
                     ys,
@@ -416,59 +485,52 @@ def plot_id_vs_ood_scatter(
                     label=m,
                 )
 
-                # Best-fit line in log-log space: log10(y) = m*log10(x) + b
-                if fit_loglog:
-                    fit = _fit_loglog_line(xs, ys)
-                    if fit is not None:
-                        slope, intercept = fit
-                        x_lo = float(np.nanmin(xs))
-                        x_hi = float(np.nanmax(xs))
-                        if loglog and x_lo > 0.0 and x_hi > 0.0 and x_hi > x_lo:
-                            x_line = np.logspace(np.log10(x_lo), np.log10(x_hi), 100)
-                        else:
-                            x_line = np.linspace(x_lo, x_hi, 100)
-                        y_line = 10.0 ** (slope * np.log10(x_line) + intercept)
+                if fit:
+                    result = _fit_probit_line(xs, ys)
+                    if result is not None:
+                        slope, intercept = result
+                        px_lo = _probit(float(np.nanmin(xs)) / divisor)
+                        px_hi = _probit(float(np.nanmax(xs)) / divisor)
+                        if not (np.isfinite(px_lo) and np.isfinite(px_hi)):
+                            continue
+                        pz = np.linspace(px_lo, px_hi, 200)
+                        x_line_pct = _probit_inv(pz) * divisor
+                        y_line_pct = _probit_inv(slope * pz + intercept) * divisor
                         ax.plot(
-                            x_line,
-                            y_line,
+                            x_line_pct,
+                            y_line_pct,
                             color=color_map[m],
                             linewidth=2.5,
                             alpha=0.9,
                             zorder=2,
                         )
 
-            ax.set_xlabel(f"{short_id} pass@{k}")
-            ax.set_ylabel(f"{short_og} pass@{k}")
-            ax.set_title(f"{og}")
+            ax.set_xlabel(f"{short_id} pass@{k} (%)")
+            ax.set_ylabel(f"{short_og} pass@{k} (%)")
+            ax.set_title(og)
 
-            # Set independent x/y ranges from plotted values
             if all_x and all_y:
-                x_min = float(np.nanmin(all_x))
-                x_max = float(np.nanmax(all_x))
-                y_min = float(np.nanmin(all_y))
-                y_max = float(np.nanmax(all_y))
+                x_min, x_max = float(np.nanmin(all_x)), float(np.nanmax(all_x))
+                y_min, y_max = float(np.nanmin(all_y)), float(np.nanmax(all_y))
+                if probit:
+                    pad_pct = 2.0
+                    ax.set_xlim(max(EPS_PCT, x_min - pad_pct), min(divisor - EPS_PCT, x_max + pad_pct))
+                    ax.set_ylim(max(EPS_PCT, y_min - pad_pct), min(divisor - EPS_PCT, y_max + pad_pct))
 
-                if loglog:
-                    pad = 1.25
-                    x_lo = max(value_floor, x_min / pad)
-                    y_lo = max(value_floor, y_min / pad)
-                    x_hi = x_max * pad
-                    y_hi = y_max * pad
-                    if value_ceiling is not None and value_ceiling > 0:
-                        x_hi = min(float(value_ceiling), x_hi)
-                        y_hi = min(float(value_ceiling), y_hi)
-                    ax.set_xlim(x_lo, x_hi)
-                    ax.set_ylim(y_lo, y_hi)
+                    xticks = _probit_ticks(x_min - pad_pct, x_max + pad_pct)
+                    yticks = _probit_ticks(y_min - pad_pct, y_max + pad_pct)
+                    ax.set_xticks(xticks)
+                    ax.set_yticks(yticks)
+                    ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
+                    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
                 else:
                     pad = 0.05
-                    dx = max(1e-12, x_max - x_min)
-                    dy = max(1e-12, y_max - y_min)
+                    dx, dy = max(1e-12, x_max - x_min), max(1e-12, y_max - y_min)
                     ax.set_xlim(x_min - pad * dx, x_max + pad * dx)
                     ax.set_ylim(y_min - pad * dy, y_max + pad * dy)
 
-            ax.grid(True, which="both", alpha=0.25, linewidth=0.8)
+            ax.grid(True, which="major", alpha=0.3, linewidth=0.8)
 
-        # Single shared legend (deduplicate)
         handles, labels = axes[0].get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
         fig.legend(by_label.values(), by_label.keys(), loc="lower center", ncol=min(4, len(by_label)))
