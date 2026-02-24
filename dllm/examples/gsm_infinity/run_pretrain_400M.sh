@@ -190,7 +190,7 @@ train_bd3lm() {
         --max_grad_norm 1.0 \
         --per_device_train_batch_size 64 \
         --gradient_accumulation_steps 1 \
-        --block_size 32 \
+        --block_size 128 \
         --attn_implementation flex_attention \
         --bf16 True \
         --gradient_checkpointing True \
