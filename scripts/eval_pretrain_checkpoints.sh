@@ -4,13 +4,16 @@
 # PARALLELIZED across 8 GPUs (one checkpoint per GPU, batched in groups of 8)
 #
 # Notes:
-# - BD3LM defaults to pass@128, steps=256.
-# - MDLM is much slower; by default this script runs an ~12h-friendly sweep:
-#     - ~10 evenly spaced checkpoints
-#     - pass@32, steps=64, max_new_tokens=512
-#   You can override with env vars, e.g.:
-#     MDLM_N_SAMPLES=16 MDLM_STEPS=64 MDLM_NUM_CHECKPOINTS=10 \
+# - Both BD3LM and MDLM evaluate ~10 evenly spaced checkpoints by default.
+# - BD3LM defaults: pass@128, steps=256. block_size is auto-detected from
+#   each run's training_args.bin (some runs use 32, others 128).
+#   Override with BD3LM_BLOCK_SIZE=<val> if needed.
+# - MDLM is much slower; defaults to pass@32, steps=128, max_new_tokens=1024.
+# - Override with env vars, e.g.:
+#     MDLM_N_SAMPLES=16 MDLM_STEPS=64 MDLM_NUM_CHECKPOINTS=12 \
 #       ./scripts/eval_pretrain_checkpoints.sh mdlm <run_dir>
+#     BD3LM_NUM_CHECKPOINTS=12 \
+#       ./scripts/eval_pretrain_checkpoints.sh bd3lm <run_dir>
 # =============================================================================
 
 PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
@@ -42,6 +45,7 @@ BD3LM_N_SAMPLES="${BD3LM_N_SAMPLES:-128}"
 BD3LM_STEPS="${BD3LM_STEPS:-256}"
 BD3LM_BATCH_SIZE="${BD3LM_BATCH_SIZE:-64}"
 BD3LM_MAX_NEW_TOKENS="${BD3LM_MAX_NEW_TOKENS:-1024}"
+BD3LM_NUM_CHECKPOINTS="${BD3LM_NUM_CHECKPOINTS:-10}"
 
 # MDLM is extremely slow at pass@128 + 256 steps. Default to a fast sweep
 # configuration intended to finish an 8-GPU node run in ~12 hours for ~10 ckpts.
@@ -53,7 +57,7 @@ MDLM_NUM_CHECKPOINTS="${MDLM_NUM_CHECKPOINTS:-10}"
 
 # Transformer defaults (vLLM-backed evaluation in scripts/eval_checkpoints.py)
 TRANSFORMER_SAMPLE_K="${TRANSFORMER_SAMPLE_K:-128}"
-TRANSFORMER_MAX_NEW_TOKENS="${TRANSFORMER_MAX_NEW_TOKENS:-2048}"
+TRANSFORMER_MAX_NEW_TOKENS="${TRANSFORMER_MAX_NEW_TOKENS:-1024}"
 
 # Avoid noisy/rare NumExpr thread init failures on big nodes.
 export NUMEXPR_MAX_THREADS="${NUMEXPR_MAX_THREADS:-64}"
@@ -66,7 +70,7 @@ echo "Output: $OUTPUT_BASE"
 if [ "$RUN_TYPE" == "mdlm" ]; then
     echo "Mode: PARALLEL on 8 GPUs | pass@${MDLM_N_SAMPLES}, steps=${MDLM_STEPS}, batch=${MDLM_BATCH_SIZE}, max_new_tokens=${MDLM_MAX_NEW_TOKENS} | ~${MDLM_NUM_CHECKPOINTS} ckpts"
 elif [ "$RUN_TYPE" == "bd3lm" ]; then
-    echo "Mode: PARALLEL on 8 GPUs | pass@${BD3LM_N_SAMPLES}, steps=${BD3LM_STEPS}, batch=${BD3LM_BATCH_SIZE}, max_new_tokens=${BD3LM_MAX_NEW_TOKENS}"
+    echo "Mode: PARALLEL on 8 GPUs | pass@${BD3LM_N_SAMPLES}, steps=${BD3LM_STEPS}, batch=${BD3LM_BATCH_SIZE}, max_new_tokens=${BD3LM_MAX_NEW_TOKENS} | ~${BD3LM_NUM_CHECKPOINTS} ckpts"
 else
     echo "Mode: PARALLEL on 8 GPUs | transformer sample_k=${TRANSFORMER_SAMPLE_K}"
 fi
@@ -87,9 +91,17 @@ for p in paths: print(p)
 
 ALL_CHECKPOINT_LIST=($CHECKPOINTS)
 
-# For MDLM, only evaluate ~N evenly spaced checkpoints by default.
+# For DLLM runs, only evaluate ~N evenly spaced checkpoints by default.
 if [ "$RUN_TYPE" == "mdlm" ]; then
-    CHECKPOINTS=$(python3 - "$MDLM_NUM_CHECKPOINTS" "${ALL_CHECKPOINT_LIST[@]}" <<'PY'
+    DLLM_NUM_CKPTS="$MDLM_NUM_CHECKPOINTS"
+elif [ "$RUN_TYPE" == "bd3lm" ]; then
+    DLLM_NUM_CKPTS="$BD3LM_NUM_CHECKPOINTS"
+else
+    DLLM_NUM_CKPTS=0
+fi
+
+if [ "$DLLM_NUM_CKPTS" -gt 0 ] 2>/dev/null; then
+    CHECKPOINTS=$(python3 - "$DLLM_NUM_CKPTS" "${ALL_CHECKPOINT_LIST[@]}" <<'PY'
 import os
 import re
 import sys
@@ -140,6 +152,37 @@ echo "Found $TOTAL checkpoints."
 source "$PROJECT_ROOT/gsm_pretrain/bin/activate"
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/dllm:$PYTHONPATH"
 
+# For BD3LM, auto-detect the training block_size from the first checkpoint's
+# training_args.bin. Falls back to 32 if detection fails.
+if [ "$RUN_TYPE" == "bd3lm" ]; then
+    FIRST_CKPT="${CHECKPOINT_LIST[0]}"
+    DETECTED_BLOCK_SIZE=$(python3 - "$FIRST_CKPT" <<'PYBS'
+import pickle, io, sys, zipfile
+path = sys.argv[1] + "/training_args.bin"
+try:
+    class Unpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            try:
+                return super().find_class(module, name)
+            except:
+                return type(name, (), {"__init__": lambda self, *a, **kw: self.__dict__.update(kw)})
+    with open(path, "rb") as f:
+        zf = zipfile.ZipFile(io.BytesIO(f.read()))
+    for n in zf.namelist():
+        if n.endswith("data.pkl"):
+            obj = Unpickler(io.BytesIO(zf.read(n))).load()
+            print(getattr(obj, "block_size", 32))
+            break
+    else:
+        print(32)
+except Exception:
+    print(32)
+PYBS
+    )
+    BD3LM_BLOCK_SIZE="${BD3LM_BLOCK_SIZE:-$DETECTED_BLOCK_SIZE}"
+    echo "BD3LM block_size (from training): $BD3LM_BLOCK_SIZE"
+fi
+
 # Distribute checkpoints round-robin to 8 GPUs and launch
 PIDS=()
 for ((i=0; i<TOTAL; i++)); do
@@ -188,6 +231,7 @@ for ((i=0; i<TOTAL; i++)); do
                 --batch_size "$BD3LM_BATCH_SIZE" \
                 --max_new_tokens "$BD3LM_MAX_NEW_TOKENS" \
                 --steps "$BD3LM_STEPS" \
+                --block_size_bd3lm "$BD3LM_BLOCK_SIZE" \
                 --temperature 0.7 \
                 --output_dir "$OUT_DIR" > "$OUT_DIR/eval.log" 2>&1 &
         fi

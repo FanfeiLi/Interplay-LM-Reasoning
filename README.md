@@ -86,6 +86,100 @@ ds["train"].to_json("composition-train.jsonl")
 ```
 where `solution_body` and `final_answer` are parsed from the `solution` field.
 
+## Training & Evaluation
+
+### Prerequisites
+
+```bash
+# Activate the shared virtual environment
+source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+```
+
+### 1. Transformer Pre-training (LLaMA-Factory)
+
+Standard next-token prediction on Qwen2 architectures (100M / 200M / 400M).
+
+| Model | Config | Run Script |
+|-------|--------|------------|
+| 100M  | `LLaMA-Factory/examples/gsm_infinity/pt_op2-10_10B_alltemps.yaml` | `scripts/run_pretrain_gsm_infinity.sh` |
+| 200M  | `LLaMA-Factory/examples/gsm_infinity/pt_200M.yaml` | `scripts/run_pretrain_200M_ar.sh` |
+| 400M  | `LLaMA-Factory/examples/gsm_infinity/pt_400M.yaml` | `scripts/run_pretrain_400M_ar.sh` |
+
+```bash
+# Train 100M transformer (8x H100)
+bash scripts/run_pretrain_gsm_infinity.sh
+
+# Train 200M / 400M
+bash scripts/run_pretrain_200M_ar.sh
+bash scripts/run_pretrain_400M_ar.sh
+```
+
+Checkpoints are saved to `LLaMA-Factory/saves/gsm_infinity/`.
+
+### 2. Diffusion LM Pre-training (dLLM)
+
+Train A2D-MDLM (masked diffusion) and A2D-BD3LM (block diffusion) models.
+
+| Model | Run Script |
+|-------|------------|
+| 100M MDLM / BD3LM | `dllm/examples/gsm_infinity/run_pretrain.sh {mdlm,bd3lm}` |
+| 200M MDLM / BD3LM | `dllm/examples/gsm_infinity/run_pretrain_200M.sh {mdlm,bd3lm}` |
+| 400M MDLM / BD3LM | `dllm/examples/gsm_infinity/run_pretrain_400M.sh {mdlm,bd3lm}` |
+
+```bash
+# Preprocess data (once)
+bash dllm/examples/gsm_infinity/run_pretrain.sh preprocess
+
+# Train 100M models (8x H100)
+bash dllm/examples/gsm_infinity/run_pretrain.sh mdlm
+bash dllm/examples/gsm_infinity/run_pretrain.sh bd3lm
+
+# Train 200M / 400M
+bash dllm/examples/gsm_infinity/run_pretrain_200M.sh mdlm
+bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm
+```
+
+Checkpoints are saved to `dllm/saves/gsm_infinity/`. See [`dllm/examples/gsm_infinity/README.md`](dllm/examples/gsm_infinity/README.md) for full details.
+
+### 3. Evaluating Pre-trained Checkpoints
+
+A single script evaluates ~10 evenly spaced checkpoints across 8 GPUs in parallel:
+
+```bash
+# Usage: ./scripts/eval_pretrain_checkpoints.sh <mdlm|bd3lm|transformer> <run_dir>
+
+# Diffusion models
+./scripts/eval_pretrain_checkpoints.sh bd3lm dllm/saves/gsm_infinity/a2d_bd3lm_100M_...
+./scripts/eval_pretrain_checkpoints.sh mdlm  dllm/saves/gsm_infinity/a2d_mdlm_100M_...
+
+# Transformers (vLLM-backed, pass@128)
+./scripts/eval_pretrain_checkpoints.sh transformer LLaMA-Factory/saves/gsm_infinity/pt_200M_...
+```
+
+Defaults (env-overridable):
+
+| Parameter | BD3LM | MDLM | Transformer |
+|-----------|-------|------|-------------|
+| Samples (pass@k) | 128 | 32 | 128 |
+| Diffusion steps | 256 | 128 | — |
+| Batch size | 64 | 64 | — |
+| Max new tokens | 1024 | 1024 | 1024 |
+| Checkpoints | ~10 | ~10 | all |
+
+Override any default with env vars: `BD3LM_N_SAMPLES=64 BD3LM_NUM_CHECKPOINTS=5 ./scripts/eval_pretrain_checkpoints.sh bd3lm <run_dir>`.
+BD3LM `block_size` is auto-detected from each run's training config.
+
+Results are saved to `results/dllm_eval/` or `results/transformer_eval/` with an aggregated `eval_summary.json`.
+
+### 4. RL Finetuning
+
+See [`scripts/gsm_infinity_rl/README.md`](scripts/gsm_infinity_rl/README.md) for GRPO, Dr. GSPO, and variant configs.
+
+```bash
+# Run a complete RL experiment (base eval + training + checkpoint eval)
+./scripts/gsm_infinity_rl/run_experiment.sh dr_gspo_mixed.yaml
+```
+
 ## 📚 Citation
 
 If you find this work or code useful, please consider citing:
