@@ -166,7 +166,7 @@ train_bd3lm() {
     echo "=============================================="
     echo "Training A2D-BD3LM 400M on GSM-Infinity"
     echo "  hidden=1024, layers=26, FFN=4096  →  ~398M params"
-    echo "  batch=8/GPU, accum=8, block_size=32, grad_ckpt=True"
+    echo "  batch=8/GPU, accum=8, block_size=16, grad_ckpt=True"
     echo "=============================================="
     echo "GPUs: ${NPROC}, Accel config: ${ACCEL_CONFIG}"
 
@@ -190,7 +190,7 @@ train_bd3lm() {
         --max_grad_norm 1.0 \
         --per_device_train_batch_size 64 \
         --gradient_accumulation_steps 1 \
-        --block_size 128 \
+        --block_size 16 \
         --attn_implementation flex_attention \
         --bf16 True \
         --gradient_checkpointing True \

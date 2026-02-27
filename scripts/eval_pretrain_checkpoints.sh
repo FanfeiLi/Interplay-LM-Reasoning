@@ -49,11 +49,11 @@ BD3LM_NUM_CHECKPOINTS="${BD3LM_NUM_CHECKPOINTS:-10}"
 
 # MDLM is extremely slow at pass@128 + 256 steps. Default to a fast sweep
 # configuration intended to finish an 8-GPU node run in ~12 hours for ~10 ckpts.
-MDLM_N_SAMPLES="${MDLM_N_SAMPLES:-32}"          # you can set 16/32/64/128
-MDLM_STEPS="${MDLM_STEPS:-128}"                 # diffusion steps
+MDLM_N_SAMPLES="${MDLM_N_SAMPLES:-16}"          # you can set 16/32/64/128
+MDLM_STEPS="${MDLM_STEPS:-256}"                 # diffusion steps
 MDLM_BATCH_SIZE="${MDLM_BATCH_SIZE:-64}"       # micro-batch per sampling call
 MDLM_MAX_NEW_TOKENS="${MDLM_MAX_NEW_TOKENS:-1024}"
-MDLM_NUM_CHECKPOINTS="${MDLM_NUM_CHECKPOINTS:-10}"
+MDLM_NUM_CHECKPOINTS="${MDLM_NUM_CHECKPOINTS:-8}"
 
 # Transformer defaults (vLLM-backed evaluation in scripts/eval_checkpoints.py)
 TRANSFORMER_SAMPLE_K="${TRANSFORMER_SAMPLE_K:-128}"
