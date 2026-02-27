@@ -88,6 +88,18 @@ where `solution_body` and `final_answer` are parsed from the `solution` field.
 
 ## Training & Evaluation
 
+### Quick Reference
+
+All models are trained on ~10B tokens of GSM-Infinity (op 2-10) using 8x H100 GPUs with matched hyperparameters (lr=1e-4, cosine schedule, weight_decay=0.1, seq_len=2048).
+
+| Model Family | Architecture | ~400M Config | Train Command | Eval Command |
+|---|---|---|---|---|
+| **Transformer (AR)** | Qwen2 NTP | 1024d, 26L, 16h | `bash scripts/run_pretrain_400M_ar.sh` | `./scripts/eval_pretrain_checkpoints.sh transformer <run_dir>` |
+| **A2D-MDLM** | Masked Diffusion | 1024d, 26L, 16h | `bash dllm/.../run_pretrain_400M.sh mdlm` | `./scripts/eval_pretrain_checkpoints.sh mdlm <run_dir>` |
+| **A2D-BD3LM** | Block Diffusion | 1024d, 26L, 16h | `bash dllm/.../run_pretrain_400M.sh bd3lm` | `./scripts/eval_pretrain_checkpoints.sh bd3lm <run_dir>` |
+| **Mamba-2 (SSM)** | State Space Model | 1024d, 150L, 16h | `bash lingua/.../mamba/.../run_pretrain_400M.sh` | `./scripts/eval_pretrain_checkpoints.sh mamba <run_dir>` |
+| **MTP** | Multi-Token Prediction | 1024d, 35L, 16h | `bash lingua/.../mtp/.../run_pretrain_400M.sh` | `./scripts/eval_pretrain_checkpoints.sh mtp <run_dir>` |
+
 ### Prerequisites
 
 ```bash
@@ -106,11 +118,7 @@ Standard next-token prediction on Qwen2 architectures (100M / 200M / 400M).
 | 400M  | `LLaMA-Factory/examples/gsm_infinity/pt_400M.yaml` | `scripts/run_pretrain_400M_ar.sh` |
 
 ```bash
-# Train 100M transformer (8x H100)
-bash scripts/run_pretrain_gsm_infinity.sh
-
-# Train 200M / 400M
-bash scripts/run_pretrain_200M_ar.sh
+# Train 400M transformer (8x H100)
 bash scripts/run_pretrain_400M_ar.sh
 ```
 
@@ -130,48 +138,83 @@ Train A2D-MDLM (masked diffusion) and A2D-BD3LM (block diffusion) models.
 # Preprocess data (once)
 bash dllm/examples/gsm_infinity/run_pretrain.sh preprocess
 
-# Train 100M models (8x H100)
-bash dllm/examples/gsm_infinity/run_pretrain.sh mdlm
-bash dllm/examples/gsm_infinity/run_pretrain.sh bd3lm
-
-# Train 200M / 400M
-bash dllm/examples/gsm_infinity/run_pretrain_200M.sh mdlm
+# Train 400M models (8x H100)
+bash dllm/examples/gsm_infinity/run_pretrain_400M.sh mdlm
 bash dllm/examples/gsm_infinity/run_pretrain_400M.sh bd3lm
 ```
 
 Checkpoints are saved to `dllm/saves/gsm_infinity/`. See [`dllm/examples/gsm_infinity/README.md`](dllm/examples/gsm_infinity/README.md) for full details.
 
-### 3. Evaluating Pre-trained Checkpoints
+### 3. Mamba-2 Pre-training (lingua/Mamba)
 
-A single script evaluates ~10 evenly spaced checkpoints across 8 GPUs in parallel:
+Train Mamba-2 state space models using lingua's infrastructure.
+
+| Model | Config | Run Script |
+|-------|--------|------------|
+| 400M | `lingua/apps/mamba/gsm_infinity/configs/mamba_400M_gsm.yaml` | `lingua/apps/mamba/gsm_infinity/run_pretrain_400M.sh` |
 
 ```bash
-# Usage: ./scripts/eval_pretrain_checkpoints.sh <mdlm|bd3lm|transformer> <run_dir>
+# Preprocess data (once, shared with MTP)
+bash lingua/apps/mamba/gsm_infinity/run_pretrain_400M.sh preprocess
 
-# Diffusion models
-./scripts/eval_pretrain_checkpoints.sh bd3lm dllm/saves/gsm_infinity/a2d_bd3lm_100M_...
-./scripts/eval_pretrain_checkpoints.sh mdlm  dllm/saves/gsm_infinity/a2d_mdlm_100M_...
+# Train 400M Mamba-2 (8x H100)
+bash lingua/apps/mamba/gsm_infinity/run_pretrain_400M.sh train
+```
+
+Checkpoints are saved to `lingua/saves/gsm_infinity/`. Architecture: dim=1024, 150 layers, 16 heads, state_dim=128, conv_size=4 (~399M params). See [`lingua/apps/mamba/gsm_infinity/README.md`](lingua/apps/mamba/gsm_infinity/README.md) for details.
+
+### 4. MTP Pre-training (lingua/MTP)
+
+Train Multi-Token Prediction transformers using lingua's infrastructure.
+
+| Model | Config | Run Script |
+|-------|--------|------------|
+| 400M | `lingua/apps/mtp/gsm_infinity/configs/mtp_400M_gsm.yaml` | `lingua/apps/mtp/gsm_infinity/run_pretrain_400M.sh` |
+
+```bash
+# Preprocess data (once, shared with Mamba)
+bash lingua/apps/mtp/gsm_infinity/run_pretrain_400M.sh preprocess
+
+# Train 400M MTP transformer (8x H100)
+bash lingua/apps/mtp/gsm_infinity/run_pretrain_400M.sh train
+```
+
+Checkpoints are saved to `lingua/saves/gsm_infinity/`. Architecture: dim=1024, 35 layers, 16 heads, 4 KV heads, 3 future prediction heads (~406M params). See [`lingua/apps/mtp/gsm_infinity/README.md`](lingua/apps/mtp/gsm_infinity/README.md) for details.
+
+### 5. Evaluating Pre-trained Checkpoints
+
+A single script evaluates ~10 evenly spaced checkpoints across 8 GPUs in parallel. Supports all five model types:
+
+```bash
+# Usage: ./scripts/eval_pretrain_checkpoints.sh <type> <run_dir>
 
 # Transformers (vLLM-backed, pass@128)
-./scripts/eval_pretrain_checkpoints.sh transformer LLaMA-Factory/saves/gsm_infinity/pt_200M_...
+./scripts/eval_pretrain_checkpoints.sh transformer LLaMA-Factory/saves/gsm_infinity/pt_400M_...
+
+# Diffusion models
+./scripts/eval_pretrain_checkpoints.sh bd3lm dllm/saves/gsm_infinity/a2d_bd3lm_400M_...
+./scripts/eval_pretrain_checkpoints.sh mdlm  dllm/saves/gsm_infinity/a2d_mdlm_400M_...
+
+# Mamba-2
+./scripts/eval_pretrain_checkpoints.sh mamba lingua/saves/gsm_infinity/mamba_400M_gsm_...
+
+# MTP
+./scripts/eval_pretrain_checkpoints.sh mtp lingua/saves/gsm_infinity/mtp_400M_gsm_...
 ```
 
 Defaults (env-overridable):
 
-| Parameter | BD3LM | MDLM | Transformer |
-|-----------|-------|------|-------------|
-| Samples (pass@k) | 128 | 32 | 128 |
-| Diffusion steps | 256 | 128 | — |
-| Batch size | 64 | 64 | — |
-| Max new tokens | 1024 | 1024 | 1024 |
-| Checkpoints | ~10 | ~10 | all |
+| Parameter | BD3LM | MDLM | Transformer | Mamba | MTP |
+|-----------|-------|------|-------------|-------|-----|
+| Samples (pass@k) | 128 | 32 | 128 | 128 | 128 |
+| Max new tokens | 1024 | 1024 | 1024 | 1024 | 1024 |
+| Checkpoints | ~10 | ~10 | all | ~10 | ~10 |
 
-Override any default with env vars: `BD3LM_N_SAMPLES=64 BD3LM_NUM_CHECKPOINTS=5 ./scripts/eval_pretrain_checkpoints.sh bd3lm <run_dir>`.
-BD3LM `block_size` is auto-detected from each run's training config.
+Override any default with env vars, e.g.: `MAMBA_N_SAMPLES=64 ./scripts/eval_pretrain_checkpoints.sh mamba <run_dir>`.
 
-Results are saved to `results/dllm_eval/` or `results/transformer_eval/` with an aggregated `eval_summary.json`.
+Results are saved to `results/{transformer,dllm,mamba,mtp}_eval/` with an aggregated `eval_summary.json`.
 
-### 4. RL Finetuning
+### 6. RL Finetuning
 
 See [`scripts/gsm_infinity_rl/README.md`](scripts/gsm_infinity_rl/README.md) for GRPO, Dr. GSPO, and variant configs.
 
