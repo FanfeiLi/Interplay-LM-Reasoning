@@ -3,12 +3,12 @@
 # ~399M params (weight_tying=True) / ~401M (weight_tying=False)
 # Data: 10B tokens, op range 2-10, seq_len=2048
 # Hardware: 8x H100 GPUs
-# Effective batch: 2/GPU × 32 accum × 8 GPUs × 2048 tokens ≈ 1M tokens/step
+# Effective batch: 4/GPU × 16 accum × 8 GPUs × 2048 tokens ≈ 1M tokens/step
 
 name: "mamba_400M_gsm"
 steps: 10_000
 seed: 42
-grad_acc_steps: 32
+grad_acc_steps: 16
 
 optim:
   lr: 1.0e-4
@@ -43,7 +43,7 @@ data:
   root_dir: null
   sources:
     gsm_infinity: 100.0
-  batch_size: 2
+  batch_size: 4
   prefetch_size: 64
   seq_len: 2048
   n_views: 2
