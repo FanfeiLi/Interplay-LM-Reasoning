@@ -429,14 +429,27 @@ def train(args: TrainArgs):
             # optimizer step
             grad_norm = -1.0
             if train_state.acc_step == 0:
-                # foreach=False avoids DTensor all_reduce group lookup bug in PyTorch 2.6
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=args.optim.clip, foreach=False
-                )
-
-                grad_norm = (
-                    grad_norm.full_tensor() if isinstance(grad_norm, DTensor) else grad_norm
-                ).item()
+                # Manual grad clipping on local tensors to avoid PyTorch 2.6
+                # DTensor all_reduce bug in clip_grad_norm_ ("get_group_info: no
+                # group info associated with the group name").
+                max_norm = float(args.optim.clip)
+                local_grads = [
+                    p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
+                    for p in model.parameters()
+                    if p.grad is not None
+                ]
+                if local_grads:
+                    total_norm = torch.norm(
+                        torch.stack([torch.norm(g.detach(), 2) for g in local_grads]), 2
+                    )
+                    torch.distributed.all_reduce(total_norm, op=torch.distributed.ReduceOp.MAX)
+                    clip_coef = max_norm / (total_norm + 1e-6)
+                    clip_coef = torch.clamp(clip_coef, max=1.0)
+                    for g in local_grads:
+                        g.mul_(clip_coef)
+                    grad_norm = total_norm.item()
+                else:
+                    grad_norm = 0.0
 
                 optimizer.step()
                 scheduler.step()
