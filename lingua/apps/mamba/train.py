@@ -429,9 +429,9 @@ def train(args: TrainArgs):
             # optimizer step
             grad_norm = -1.0
             if train_state.acc_step == 0:
-                # Warning: FSDP + clip grad norm for_each=true triggers seg faults on pytorch nightly
+                # foreach=False avoids DTensor all_reduce group lookup bug in PyTorch 2.6
                 grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=args.optim.clip, foreach=True
+                    model.parameters(), max_norm=args.optim.clip, foreach=False
                 )
 
                 grad_norm = (
