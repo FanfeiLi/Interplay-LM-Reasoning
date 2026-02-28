@@ -6,8 +6,8 @@ The composition_hf data lives at:
     data/composition_hf/train/{op}/shard-*.jsonl
 Each line has: {"problem": ..., "question": ..., "solution": ..., ...}
 
-This script reads all shards for ops in [op_min, op_max], converts each
-example to the standard training text format:
+This script reads all shards for ops in [op_min, op_max] in parallel across
+CPUs, converts each example to the standard training text format:
     <question> {problem} {question} </question> <solution> {body} </solution> <answer> {answer} </answer>
 and writes balanced, shuffled JSONL chunks to the output directory.
 
@@ -22,17 +22,17 @@ Usage:
         --output_dir   /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_lingua/gsm_infinity \
         --op_min 2 --op_max 10 \
         --token_budget 10B \
-        --tokenizer_path /fast/pmayilvahanan/Interplay-LM-Reasoning/model_configs/qwen2_400M \
-        --lines_per_chunk 10000
+        --lines_per_chunk 10000 \
+        --workers 16
 """
 
 import argparse
 import json
 import os
 import random
-import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 
 
 def _split_solution(sol: str) -> Tuple[str, str]:
@@ -64,8 +64,50 @@ def parse_budget(budget_str: str) -> int:
     return int(budget_str)
 
 
-def estimate_tokens(text: str, tokenizer) -> int:
-    return len(tokenizer.encode(text, add_special_tokens=False))
+CHARS_PER_TOKEN = 4
+
+
+def _process_shard(shard_path: str, token_limit: int) -> Tuple[List[str], int]:
+    """Read a single shard file, return (texts, approx_token_count)."""
+    texts = []
+    tokens = 0
+    with open(shard_path) as f:
+        for line in f:
+            if tokens >= token_limit:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            example = json.loads(line)
+            text = format_example(example)
+            n_tok = len(text) // CHARS_PER_TOKEN
+            texts.append(text)
+            tokens += n_tok
+    return texts, tokens
+
+
+def _process_op(op: int, raw_dir: str, budget_per_op: int) -> Tuple[int, List[str], int]:
+    """Process all shards for a single op level. Runs in a worker process."""
+    op_dir = Path(raw_dir) / str(op)
+    if not op_dir.exists():
+        return op, [], 0
+
+    shards = sorted(op_dir.glob("*.jsonl"))
+    if not shards:
+        return op, [], 0
+
+    op_texts = []
+    op_tokens = 0
+
+    for shard in shards:
+        if op_tokens >= budget_per_op:
+            break
+        remaining = budget_per_op - op_tokens
+        texts, tokens = _process_shard(str(shard), remaining)
+        op_texts.extend(texts)
+        op_tokens += tokens
+
+    return op, op_texts, op_tokens
 
 
 def main():
@@ -75,75 +117,44 @@ def main():
     parser.add_argument("--op_min", type=int, default=2)
     parser.add_argument("--op_max", type=int, default=10)
     parser.add_argument("--token_budget", type=str, default="10B")
-    parser.add_argument("--tokenizer_path", type=str, default=None,
-                        help="HF tokenizer path for token counting (if None, estimate ~4 chars/token)")
     parser.add_argument("--lines_per_chunk", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Number of parallel workers (default: min(n_ops, cpu_count))")
     args = parser.parse_args()
 
     random.seed(args.seed)
     budget = parse_budget(args.token_budget)
-    print(f"Token budget: {budget:,} tokens")
 
-    tokenizer = None
-    if args.tokenizer_path:
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path, trust_remote_code=True)
-        print(f"Loaded tokenizer from {args.tokenizer_path} (vocab size: {len(tokenizer)})")
-
-    raw_dir = Path(args.raw_data_dir)
     ops = list(range(args.op_min, args.op_max + 1))
     n_ops = len(ops)
     budget_per_op = budget // n_ops
+    n_workers = args.workers or min(n_ops, os.cpu_count() or 4)
+
+    print(f"Token budget: {budget:,} (~{budget_per_op:,} per op)")
+    print(f"Ops: {ops} | Workers: {n_workers}")
+    print(f"Token estimation: ~{CHARS_PER_TOKEN} chars/token (no tokenizer needed)")
+    print()
 
     all_texts = []
     total_tokens = 0
 
-    for op in ops:
-        op_dir = raw_dir / str(op)
-        if not op_dir.exists():
-            print(f"  WARNING: {op_dir} not found, skipping op={op}")
-            continue
-
-        shards = sorted(op_dir.glob("*.jsonl"))
-        if not shards:
-            print(f"  WARNING: No JSONL files in {op_dir}, skipping op={op}")
-            continue
-
-        op_texts = []
-        op_tokens = 0
-
-        for shard in shards:
-            if op_tokens >= budget_per_op:
-                break
-            with open(shard) as f:
-                for line in f:
-                    if op_tokens >= budget_per_op:
-                        break
-                    line = line.strip()
-                    if not line:
-                        continue
-                    example = json.loads(line)
-                    text = format_example(example)
-                    if tokenizer:
-                        n_tok = estimate_tokens(text, tokenizer)
-                    else:
-                        n_tok = len(text) // 4
-                    op_texts.append(text)
-                    op_tokens += n_tok
-
-        total_tokens += op_tokens
-        all_texts.extend(op_texts)
-        print(f"  op={op}: {len(op_texts):>8,} examples, ~{op_tokens:>12,} tokens "
-              f"(from {len(shards)} shards)")
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {
+            pool.submit(_process_op, op, args.raw_data_dir, budget_per_op): op
+            for op in ops
+        }
+        for future in as_completed(futures):
+            op, op_texts, op_tokens = future.result()
+            total_tokens += op_tokens
+            all_texts.extend(op_texts)
+            print(f"  op={op}: {len(op_texts):>8,} examples, ~{op_tokens:>12,} tokens")
 
     print(f"\nTotal: {len(all_texts):,} examples, ~{total_tokens:,} tokens")
 
-    # Shuffle
     print("Shuffling...")
     random.shuffle(all_texts)
 
-    # Write chunks
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
