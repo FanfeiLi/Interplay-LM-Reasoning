@@ -1,4 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# Updated for causal_conv1d >= 1.6.0 (in-place out tensor API).
 
 from typing import Optional, Tuple
 import torch
@@ -17,24 +18,20 @@ def causal_conv1d_fwd(
     seq_idx: Optional[torch.Tensor] = None,
     activation: Optional[str] = None,
 ) -> torch.Tensor:
-    # Ensure activation is valid
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
 
-    # Ensure x is contiguous
     if x.stride(2) != 1 and x.stride(1) != 1:
         x = x.contiguous()
 
-    # Make bias and seq_idx contiguous if they exist
     bias = bias.contiguous() if bias is not None else None
     seq_idx = seq_idx.contiguous() if seq_idx is not None else None
 
-    # Translate activation to bool for custom CUDA kernel
     use_activation = activation in ["silu", "swish"]
+    out = torch.empty_like(x)
 
-    # Call custom CUDA kernel for forward pass
-    out = causal_conv1d_cuda.causal_conv1d_fwd(
-        x, weight, bias, seq_idx, None, None, use_activation
+    causal_conv1d_cuda.causal_conv1d_fwd(
+        x, weight, bias, seq_idx, None, out, None, use_activation
     )
     return out
 
@@ -64,18 +61,28 @@ def causal_conv1d_bwd(
     seq_idx: Optional[torch.Tensor],
     activation: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    # Ensure dout is contiguous
     if dout.stride(2) != 1 and dout.stride(1) != 1:
         dout = dout.contiguous()
 
-    # Call custom CUDA kernel for backward pass
-    dx, dweight, dbias, _ = causal_conv1d_cuda.causal_conv1d_bwd(
-        x, weight, bias, dout, seq_idx, None, None, None, False, activation
+    dx = torch.empty_like(x)
+    dweight = torch.zeros_like(weight, dtype=torch.float32)
+    dbias = torch.zeros_like(bias, dtype=torch.float32) if bias is not None else None
+
+    causal_conv1d_cuda.causal_conv1d_bwd(
+        x, weight, bias, dout, seq_idx,
+        None,   # initial_states
+        None,   # dfinal_states
+        dx, dweight, dbias,
+        None,   # dinitial_states
+        activation,
     )
 
-    # Handle optional bias gradient
-    dbias = dbias if bias is not None else torch.empty((0,), device=dout.device)
-    
+    dweight = dweight.to(weight.dtype)
+    if dbias is not None:
+        dbias = dbias.to(bias.dtype)
+    else:
+        dbias = torch.empty((0,), device=dout.device)
+
     return dx, dweight, dbias
 
 # Register a fake backward pass for tracing
@@ -134,26 +141,15 @@ def causal_conv1d_update_fwd(
     activation: Optional[str] = None,
     cache_seqlens: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """
-    x: (batch, dim) or (batch, dim, seqlen)
-    conv_state: (batch, dim, state_len), where state_len >= width - 1
-    weight: (dim, width)
-    bias: (dim,)
-    cache_seqlens: (batch,), dtype int32.
-        If not None, the conv_state is treated as a circular buffer.
-        The conv_state will be updated by copying x to the conv_state starting at the index
-        @cache_seqlens % state_len.
-
-    out: (batch, dim) or (batch, dim, seqlen)
-    """
     if activation not in [None, "silu", "swish"]:
         raise NotImplementedError("activation must be None, silu, or swish")
-    activation = activation in ["silu", "swish"]
+    use_activation = activation in ["silu", "swish"]
     unsqueeze = x.dim() == 2
     if unsqueeze:
         x = x.unsqueeze(-1)
-    out = causal_conv1d_cuda.causal_conv1d_update(
-        x, conv_state, weight, bias, activation, cache_seqlens
+    out = torch.empty_like(x)
+    causal_conv1d_cuda.causal_conv1d_update(
+        x, conv_state, weight, bias, out, use_activation, cache_seqlens, None
     )
     if unsqueeze:
         out = out.squeeze(-1)
