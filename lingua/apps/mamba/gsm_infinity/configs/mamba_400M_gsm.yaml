@@ -4,12 +4,12 @@
 # Note: MambaBlock passes hidden_dim=3*dim to SSM, so effective hidden=2048
 # Data: 10B tokens, op range 2-10, seq_len=2048
 # Hardware: 8x H100 GPUs
-# Effective batch: 12/GPU × 5 accum × 8 GPUs × 2048 tokens ≈ 983K tokens/step
+# Effective batch: 8/GPU × 8 accum × 8 GPUs × 2048 tokens ≈ 1M tokens/step
 
 name: "mamba_400M_gsm"
 steps: 10_000
 seed: 42
-grad_acc_steps: 5
+grad_acc_steps: 8
 
 optim:
   lr: 1.0e-4
@@ -20,7 +20,7 @@ optim:
 
 distributed:
   fsdp_type: full_shard
-  compile: true
+  compile: false
   model_dtype: bf16
   matmul_allow_tf32: false
   selective_activation_checkpointing: true
@@ -44,7 +44,7 @@ data:
   root_dir: null
   sources:
     gsm_infinity: 100.0
-  batch_size: 12
+  batch_size: 8
   prefetch_size: 64
   seq_len: 2048
   n_views: 2
