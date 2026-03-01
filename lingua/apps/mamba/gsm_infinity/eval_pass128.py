@@ -127,10 +127,10 @@ def evaluate(
     test_dir: str,
     n_samples: int,
     output_dir: str,
-    max_gen_len: int = 1024,
+    max_gen_len: int = 512,
     temperature: float = 0.7,
-    max_tokens: int = 16384,
-    batch_size: int = 32,
+    max_tokens: int = 65536,
+    batch_size: int = 128,
     op_levels=None,
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -224,11 +224,11 @@ def main():
                         default="/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small")
     parser.add_argument("--n_samples", type=int, default=128)
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--max_gen_len", type=int, default=1024)
+    parser.add_argument("--max_gen_len", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--max_tokens", type=int, default=16384,
+    parser.add_argument("--max_tokens", type=int, default=65536,
                         help="Token budget for packed generation (higher = more parallel samples)")
-    parser.add_argument("--batch_size", type=int, default=32,
+    parser.add_argument("--batch_size", type=int, default=128,
                         help="Number of samples to generate per call")
     parser.add_argument("--op_levels", type=str, default=None,
                         help="Comma-separated op levels (default: all)")
