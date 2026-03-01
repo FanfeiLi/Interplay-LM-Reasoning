@@ -174,11 +174,9 @@ def evaluate(
             prompt_text = build_prompt(example)
             gold_answer = get_gold_answer(example)
 
-            prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-
             n_correct = 0
             for _ in range(n_samples):
-                generation, _, _ = generator.generate([prompt_tokens])
+                generation, _, _ = generator.generate([prompt_text])
                 gen_text = generation[0]
                 if check_answer(gen_text, gold_answer):
                     n_correct += 1
