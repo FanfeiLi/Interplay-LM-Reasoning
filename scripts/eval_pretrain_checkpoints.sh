@@ -69,13 +69,15 @@ TRANSFORMER_MAX_NEW_TOKENS="${TRANSFORMER_MAX_NEW_TOKENS:-1024}"
 # Mamba defaults (lingua PackedCausalMambaGenerator)
 MAMBA_N_SAMPLES="${MAMBA_N_SAMPLES:-128}"
 MAMBA_MAX_GEN_LEN="${MAMBA_MAX_GEN_LEN:-1024}"
-MAMBA_MAX_TOKENS="${MAMBA_MAX_TOKENS:-2048}"
+MAMBA_MAX_TOKENS="${MAMBA_MAX_TOKENS:-16384}"
+MAMBA_BATCH_SIZE="${MAMBA_BATCH_SIZE:-32}"
 MAMBA_NUM_CHECKPOINTS="${MAMBA_NUM_CHECKPOINTS:-10}"
 
 # MTP defaults (lingua PackedCausalTransformerGenerator)
 MTP_N_SAMPLES="${MTP_N_SAMPLES:-128}"
 MTP_MAX_GEN_LEN="${MTP_MAX_GEN_LEN:-1024}"
-MTP_MAX_TOKENS="${MTP_MAX_TOKENS:-2048}"
+MTP_MAX_TOKENS="${MTP_MAX_TOKENS:-16384}"
+MTP_BATCH_SIZE="${MTP_BATCH_SIZE:-32}"
 MTP_NUM_CHECKPOINTS="${MTP_NUM_CHECKPOINTS:-10}"
 
 # Avoid noisy/rare NumExpr thread init failures on big nodes.
@@ -271,6 +273,7 @@ for ((i=0; i<TOTAL; i++)); do
             --n_samples "$MAMBA_N_SAMPLES" \
             --max_gen_len "$MAMBA_MAX_GEN_LEN" \
             --max_tokens "$MAMBA_MAX_TOKENS" \
+            --batch_size "$MAMBA_BATCH_SIZE" \
             --temperature 0.7 \
             --output_dir "$OUT_DIR" > "$OUT_DIR/eval.log" 2>&1 &
     elif [ "$RUN_TYPE" == "mtp" ]; then
@@ -280,6 +283,7 @@ for ((i=0; i<TOTAL; i++)); do
             --n_samples "$MTP_N_SAMPLES" \
             --max_gen_len "$MTP_MAX_GEN_LEN" \
             --max_tokens "$MTP_MAX_TOKENS" \
+            --batch_size "$MTP_BATCH_SIZE" \
             --temperature 0.7 \
             --output_dir "$OUT_DIR" > "$OUT_DIR/eval.log" 2>&1 &
     elif [ "$RUN_TYPE" == "mdlm" ]; then

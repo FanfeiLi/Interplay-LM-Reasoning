@@ -21,7 +21,8 @@ OUTPUT_DIR="${2:?Error: output directory required}"
 N_SAMPLES="${3:-128}"
 TEMPERATURE="${TEMPERATURE:-0.7}"
 MAX_GEN_LEN="${MAX_GEN_LEN:-1024}"
-MAX_TOKENS="${MAX_TOKENS:-2048}"
+MAX_TOKENS="${MAX_TOKENS:-16384}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
 TEST_DIR="${TEST_DIR:-$PROJECT_ROOT/data/composition_hf/test_small}"
 
 source "${PROJECT_ROOT}/gsm_pretrain/bin/activate"
@@ -36,4 +37,5 @@ python -m apps.mtp.gsm_infinity.eval_pass128 \
     --output_dir "${OUTPUT_DIR}" \
     --max_gen_len "${MAX_GEN_LEN}" \
     --temperature "${TEMPERATURE}" \
-    --max_tokens "${MAX_TOKENS}"
+    --max_tokens "${MAX_TOKENS}" \
+    --batch_size "${BATCH_SIZE}"

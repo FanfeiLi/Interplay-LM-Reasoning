@@ -133,7 +133,8 @@ def evaluate(
     output_dir: str,
     max_gen_len: int = 1024,
     temperature: float = 0.7,
-    max_tokens: int = 2048,
+    max_tokens: int = 16384,
+    batch_size: int = 32,
     op_levels=None,
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -158,6 +159,7 @@ def evaluate(
     data_by_op = load_test_data(test_dir, op_levels=op_levels)
     total_examples = sum(len(v) for v in data_by_op.values())
     print(f"Loaded {total_examples} examples across ops: {sorted(data_by_op.keys())}")
+    print(f"Batched generation: {batch_size} samples/call, max_tokens={max_tokens}")
 
     all_metrics = {}
     k_values = [k for k in [1, 2, 4, 8, 16, 32, 64, 128] if k <= n_samples]
@@ -175,11 +177,15 @@ def evaluate(
             gold_answer = get_gold_answer(example)
 
             n_correct = 0
-            for _ in range(n_samples):
-                generation, _, _ = generator.generate([prompt_text])
-                gen_text = generation[0]
-                if check_answer(gen_text, gold_answer):
-                    n_correct += 1
+            remaining = n_samples
+            while remaining > 0:
+                bs = min(batch_size, remaining)
+                batch_prompts = [prompt_text] * bs
+                generation, _, _ = generator.generate(batch_prompts)
+                for gen_text in generation:
+                    if check_answer(gen_text, gold_answer):
+                        n_correct += 1
+                remaining -= bs
 
             op_successes.append((n_samples, n_correct))
 
@@ -224,7 +230,10 @@ def main():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--max_gen_len", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.7)
-    parser.add_argument("--max_tokens", type=int, default=2048)
+    parser.add_argument("--max_tokens", type=int, default=16384,
+                        help="Token budget for packed generation (higher = more parallel samples)")
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Number of samples to generate per call")
     parser.add_argument("--op_levels", type=str, default=None,
                         help="Comma-separated op levels (default: all)")
     args = parser.parse_args()
@@ -239,6 +248,7 @@ def main():
         max_gen_len=args.max_gen_len,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
+        batch_size=args.batch_size,
         op_levels=op_levels,
     )
 
