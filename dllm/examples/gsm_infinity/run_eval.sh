@@ -1,21 +1,25 @@
 #!/bin/bash
 # =============================================================================
-# Pass@128 Evaluation Script for DLLM Models on GSM-Infinity
+# Evaluation Script for DLLM Models on GSM-Infinity
 # =============================================================================
-# Evaluates a trained DLLM checkpoint on composition_hf/test_small with pass@128.
+# Evaluates a trained DLLM checkpoint on composition_hf/test_small.
+# Default: pass@1 (N_SAMPLES=1). Set N_SAMPLES=128 for pass@128.
 #
 # Usage:
-#   # Evaluate A2D-MDLM checkpoint
+#   # Evaluate a BD3LM checkpoint (pass@1, default)
 #   bash dllm/examples/gsm_infinity/run_eval.sh \
-#       saves/gsm_infinity/a2d_mdlm_100M/checkpoint-final \
-#       mdlm \
-#       results/dllm_eval/a2d_mdlm_100M
-#
-#   # Evaluate A2D-BD3LM checkpoint
-#   bash dllm/examples/gsm_infinity/run_eval.sh \
-#       saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final \
+#       saves/gsm_infinity/a2d_bd3lm_400M_bs16_.../checkpoint-5000 \
 #       bd3lm \
-#       results/dllm_eval/a2d_bd3lm_100M
+#       results/dllm_eval/a2d_bd3lm_400M_bs16_.../checkpoint-5000
+#
+#   # Evaluate with pass@128
+#   N_SAMPLES=128 bash dllm/examples/gsm_infinity/run_eval.sh ...
+#
+#   # Sweep diffusion steps
+#   for S in 64 128 256 512; do
+#       STEPS=$S bash dllm/examples/gsm_infinity/run_eval.sh ... \
+#           results/dllm_eval/run/checkpoint-X_steps${S}
+#   done
 # =============================================================================
 
 set -e
@@ -27,12 +31,13 @@ MODEL_PATH="${1:?Error: Model path required as first argument}"
 SAMPLER_TYPE="${2:?Error: Sampler type required (mdlm or bd3lm)}"
 OUTPUT_DIR="${3:?Error: Output directory required as third argument}"
 
-# Optional arguments with defaults
-N_SAMPLES="${N_SAMPLES:-128}"
+# Optional arguments with defaults (pass@1 focused)
+N_SAMPLES="${N_SAMPLES:-1}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
 STEPS="${STEPS:-256}"
-TEMPERATURE="${TEMPERATURE:-0.7}"
+TEMPERATURE="${TEMPERATURE:-0.0}"
+BLOCK_SIZE_BD3LM="${BLOCK_SIZE_BD3LM:-16}"
 
 # =============================================================================
 # Configuration
@@ -48,13 +53,14 @@ TEST_DIR="${PROJECT_ROOT}/data/composition_hf/test_small"
 echo "=============================================="
 echo "DLLM Pass@${N_SAMPLES} Evaluation"
 echo "=============================================="
-echo "Model: ${MODEL_PATH}"
-echo "Sampler: ${SAMPLER_TYPE}"
-echo "Output: ${OUTPUT_DIR}"
-echo "Samples/prompt: ${N_SAMPLES}"
-echo "Batch size: ${BATCH_SIZE}"
-echo "Temperature: ${TEMPERATURE}"
-echo "Steps: ${STEPS}"
+echo "Model:           ${MODEL_PATH}"
+echo "Sampler:         ${SAMPLER_TYPE}"
+echo "Output:          ${OUTPUT_DIR}"
+echo "Samples/prompt:  ${N_SAMPLES}"
+echo "Batch size:      ${BATCH_SIZE}"
+echo "Temperature:     ${TEMPERATURE}"
+echo "Steps:           ${STEPS}"
+echo "BD3LM block_size: ${BLOCK_SIZE_BD3LM}"
 echo "=============================================="
 
 source "${VENV}"
@@ -78,7 +84,8 @@ python examples/gsm_infinity/eval_pass128.py \
     --batch_size "${BATCH_SIZE}" \
     --max_new_tokens "${MAX_NEW_TOKENS}" \
     --steps "${STEPS}" \
-    --temperature "${TEMPERATURE}"
+    --temperature "${TEMPERATURE}" \
+    --block_size_bd3lm "${BLOCK_SIZE_BD3LM}"
 
 echo ""
 echo "=============================================="

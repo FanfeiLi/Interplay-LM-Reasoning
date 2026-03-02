@@ -168,8 +168,8 @@ def evaluate(
     max_new_tokens: int = 1024,
     steps: int = 256,
     block_size_mdlm: int = 256,
-    block_size_bd3lm: int = 32,
-    temperature: float = 0.7,
+    block_size_bd3lm: int = 16,
+    temperature: float = 0.0,
     op_levels: list[int] | None = None,
     device: str = "cuda",
 ):
@@ -350,8 +350,8 @@ def main():
         help="Directory containing test JSONL files",
     )
     parser.add_argument(
-        "--n_samples", type=int, default=128,
-        help="Number of samples per prompt (default: 128)",
+        "--n_samples", type=int, default=1,
+        help="Number of samples per prompt (default: 1; set 128 for pass@128)",
     )
     parser.add_argument(
         "--output_dir", type=str, required=True,
@@ -370,16 +370,16 @@ def main():
         help="Number of diffusion steps (default: 256)",
     )
     parser.add_argument(
-        "--temperature", type=float, default=0.7,
-        help="Sampling temperature (default: 0.7)",
+        "--temperature", type=float, default=0.0,
+        help="Sampling temperature (default: 0.0 for greedy/pass@1; use 0.7 for pass@128)",
     )
     parser.add_argument(
         "--block_size_mdlm", type=int, default=256,
         help="Block size for MDLM sampler (default: 256)",
     )
     parser.add_argument(
-        "--block_size_bd3lm", type=int, default=32,
-        help="Block size for BD3LM sampler (default: 32)",
+        "--block_size_bd3lm", type=int, default=16,
+        help="Block size for BD3LM sampler (default: 16; should match training block_size)",
     )
     parser.add_argument(
         "--op_levels", type=str, default=None,
