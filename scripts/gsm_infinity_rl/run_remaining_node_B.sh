@@ -34,8 +34,8 @@ TOTAL=6
 # ─────────────────────────────────────────────────────────────────────────────
 # Training
 # ─────────────────────────────────────────────────────────────────────────────
-TRAIN_CONFIGS=("grpo_rup_hard_v2" "grpo_rup_mixed_v2")
-TRAIN_LABELS=("RUP Hard (op=17-20)" "RUP Mixed")
+TRAIN_CONFIGS=("grpo_rup_mixed_v2")
+TRAIN_LABELS=("RUP Mixed")
 
 for ((i=0; i<${#TRAIN_CONFIGS[@]}; i++)); do
     JOB=$((JOB+1))
