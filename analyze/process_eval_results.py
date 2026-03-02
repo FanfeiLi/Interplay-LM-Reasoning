@@ -48,7 +48,8 @@ ID_OPS: list[int] = list(range(2, 11))
 # }
 
 DEFAULT_OOD_GROUPS: dict[str, list[int]] = {
-    "OOD-hard (op=16-20)": list(range(16, 21)),
+    "OOD-mid (op=11-14)": list(range(11, 14)),
+    "OOD-hard (op=17-20)": list(range(17, 21)),
 }
 
 # Known block-size disambiguation for bd3lm runs with two runs at the same size.
@@ -63,9 +64,11 @@ _BD3LM_BLOCK_SIZE_HINTS: dict[str, int] = {
     # 200M: two runs
     "a2d_bd3lm_200M_20260223_120716": 32,
     "a2d_bd3lm_200M_20260223_221022": 128,
-    # 400M: two runs
+    # 400M: four runs
     "a2d_bd3lm_400M_20260223_203350": 32,
-    "a2d_bd3lm_400M_20260224_062453": 128,
+    #"a2d_bd3lm_400M_20260224_062453": 128,
+    "a2d_bd3lm_400M_20260227_001819": 8,
+    "a2d_bd3lm_400M_20260227_084524": 16,
 }
 
 
@@ -573,7 +576,7 @@ def plot_id_vs_ood(
     title: str = "",
     save_dir: Optional[Path] = None,
     dpi: int = 200,
-    probit: bool = True,
+    scale: str = "probit",
     fit: bool = True,
     fit_extend: bool = True,
     show_y_eq_x: bool = True,
@@ -586,10 +589,15 @@ def plot_id_vs_ood(
 
     Parameters
     ----------
+    scale : "probit", "log", or "linear".
     exclude_families : families to drop before plotting (e.g. ["BD3LM (bs=128)"]).
     fit_extend : if True, extend the fit line to the full axis limits (like the reference).
     show_y_eq_x : if True, draw a dashed y=x reference line.
     """
+    _VALID_SCALES = ("probit", "log", "linear")
+    if scale not in _VALID_SCALES:
+        raise ValueError(f"scale must be one of {_VALID_SCALES}, got {scale!r}")
+
     if df.empty:
         raise ValueError("Empty dataframe")
 
@@ -604,6 +612,23 @@ def plot_id_vs_ood(
 
     div = 100.0 if pct else 1.0
     EPS = 0.01
+
+    # ── Transform helpers (forward / inverse in data-% space) ────────────
+    if scale == "probit":
+        def _fwd(v):
+            return _probit(np.asarray(v, dtype=float) / div)
+        def _inv(z):
+            return _probit_inv(np.asarray(z, dtype=float)) * div
+    elif scale == "log":
+        def _fwd(v):
+            return np.log(np.clip(np.asarray(v, dtype=float), EPS, None))
+        def _inv(z):
+            return np.exp(np.asarray(z, dtype=float))
+    else:  # linear
+        def _fwd(v):
+            return np.asarray(v, dtype=float)
+        def _inv(z):
+            return np.asarray(z, dtype=float)
 
     if ood_groups is None:
         all_grps = [g for g in df["group"].unique() if g != id_group]
@@ -642,19 +667,24 @@ def plot_id_vs_ood(
 
     def _clean(s):
         s = pd.to_numeric(s, errors="coerce").astype(float)
-        return s.clip(lower=EPS, upper=div * (1.0 - 1e-6))
+        if scale == "probit":
+            return s.clip(lower=EPS, upper=div * (1.0 - 1e-6))
+        elif scale == "log":
+            return s.clip(lower=EPS)
+        return s
 
-    def _fit_probit(xs, ys):
+    def _fit_line(xs, ys):
+        """Fit y = m*x + b in the chosen transformed space."""
         ok = np.isfinite(xs) & np.isfinite(ys)
         xs, ys = xs[ok], ys[ok]
         if xs.size < fit_min_points:
             return None
-        px, py = _probit(xs / div), _probit(ys / div)
-        ok2 = np.isfinite(px) & np.isfinite(py)
-        px, py = px[ok2], py[ok2]
-        if px.size < fit_min_points:
+        tx, ty = _fwd(xs), _fwd(ys)
+        ok2 = np.isfinite(tx) & np.isfinite(ty)
+        tx, ty = tx[ok2], ty[ok2]
+        if tx.size < fit_min_points:
             return None
-        m, b = np.polyfit(px, py, deg=1)
+        m, b = np.polyfit(tx, ty, deg=1)
         return float(m), float(b)
 
     for k in k_values:
@@ -670,12 +700,14 @@ def plot_id_vs_ood(
         if n_panels == 1:
             axes = [axes]
 
-        # Collect axis limits first (two-pass: scatter then fit lines)
         panel_data: list[dict] = []
 
         for ax, og in zip(axes, ood_groups):
-            if probit:
+            if scale == "probit":
                 _setup_probit_axis(ax, which="both", pct=pct)
+            elif scale == "log":
+                ax.set_xscale("log")
+                ax.set_yscale("log")
 
             all_x, all_y = [], []
             fits_for_panel: list[tuple[str, float, float]] = []
@@ -699,7 +731,7 @@ def plot_id_vs_ood(
                            zorder=3, label=lab)
 
                 if fit:
-                    result = _fit_probit(xs, ys)
+                    result = _fit_line(xs, ys)
                     if result:
                         fits_for_panel.append((lab, result[0], result[1]))
 
@@ -719,23 +751,32 @@ def plot_id_vs_ood(
             xmn, xmx = float(np.nanmin(all_x)), float(np.nanmax(all_x))
             ymn, ymx = float(np.nanmin(all_y)), float(np.nanmax(all_y))
 
-            if probit:
-                # Pad by ~5% of the data range in probit space, not percentage space.
-                # This avoids the huge visual gap near 99-100%.
-                px_mn, px_mx = _probit(xmn / div), _probit(xmx / div)
-                py_mn, py_mx = _probit(ymn / div), _probit(ymx / div)
+            if scale == "probit":
+                px_mn, px_mx = _fwd(xmn), _fwd(xmx)
+                py_mn, py_mx = _fwd(ymn), _fwd(ymx)
                 x_pad = max(0.1, (px_mx - px_mn) * 0.08)
                 y_pad = max(0.1, (py_mx - py_mn) * 0.08)
-                xl = max(EPS, _probit_inv(px_mn - x_pad) * div)
-                xr = min(div - EPS, _probit_inv(px_mx + x_pad) * div)
-                yl = max(EPS, _probit_inv(py_mn - y_pad) * div)
-                yr = min(div - EPS, _probit_inv(py_mx + y_pad) * div)
+                xl = float(max(EPS, _inv(px_mn - x_pad)))
+                xr = float(min(div - EPS, _inv(px_mx + x_pad)))
+                yl = float(max(EPS, _inv(py_mn - y_pad)))
+                yr = float(min(div - EPS, _inv(py_mx + y_pad)))
                 ax.set_xlim(xl, xr)
                 ax.set_ylim(yl, yr)
                 ax.set_xticks(_probit_ticks(xl, xr))
                 ax.set_yticks(_probit_ticks(yl, yr))
                 ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
                 ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
+            elif scale == "log":
+                lx_mn, lx_mx = _fwd(xmn), _fwd(xmx)
+                ly_mn, ly_mx = _fwd(ymn), _fwd(ymx)
+                x_pad = max(0.1, (lx_mx - lx_mn) * 0.08)
+                y_pad = max(0.1, (ly_mx - ly_mn) * 0.08)
+                xl = float(max(EPS, _inv(lx_mn - x_pad)))
+                xr = float(_inv(lx_mx + x_pad))
+                yl = float(max(EPS, _inv(ly_mn - y_pad)))
+                yr = float(_inv(ly_mx + y_pad))
+                ax.set_xlim(xl, xr)
+                ax.set_ylim(yl, yr)
             else:
                 frac = 0.05
                 dx, dy = max(1e-12, xmx - xmn), max(1e-12, ymx - ymn)
@@ -744,26 +785,20 @@ def plot_id_vs_ood(
                 ax.set_xlim(xl, xr)
                 ax.set_ylim(yl, yr)
 
-            # y = x reference line
             if show_y_eq_x:
                 lo = max(xl, yl)
                 hi = min(xr, yr)
                 if hi > lo:
                     ax.plot([lo, hi], [lo, hi], color="0.6", ls="--", lw=0.9, zorder=1, label="y = x")
 
-            # Extended fit lines across the full x-axis
             for lab, sl, ic in fits:
-                if fit_extend:
-                    px_lo = _probit(xl / div)
-                    px_hi = _probit(xr / div)
-                else:
-                    px_lo = _probit(xmn / div)
-                    px_hi = _probit(xmx / div)
-                if not (np.isfinite(px_lo) and np.isfinite(px_hi)):
+                t_lo = _fwd(xl if fit_extend else xmn)
+                t_hi = _fwd(xr if fit_extend else xmx)
+                if not (np.isfinite(t_lo) and np.isfinite(t_hi)):
                     continue
-                pz = np.linspace(px_lo, px_hi, 300)
-                x_line = _probit_inv(pz) * div
-                y_line = _probit_inv(sl * pz + ic) * div
+                tz = np.linspace(float(t_lo), float(t_hi), 300)
+                x_line = _inv(tz)
+                y_line = _inv(sl * tz + ic)
                 ax.plot(x_line, y_line, color=cmap[lab], lw=2.0, alpha=0.8, zorder=2)
 
             short_og = og.split(" (", 1)[0].strip() if og else "OOD"
@@ -773,7 +808,6 @@ def plot_id_vs_ood(
             ax.grid(True, which="major", alpha=0.2, lw=0.6)
             ax.tick_params(labelsize=8.5)
 
-        # Shared legend: collect unique entries across panels, keep order
         handles, lbls = [], []
         for pd_ in panel_data:
             for h, l in zip(*pd_["ax"].get_legend_handles_labels()):
