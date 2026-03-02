@@ -1,16 +1,20 @@
 #!/bin/bash
 # =============================================================================
-# NODE B — Evaluate 4 remaining checkpoints (pass@128)
+# Evaluate all 8 remaining final checkpoints (pass@128) on one 8-GPU node
 #
-#   1. grpo_rup_hard_v2          (eval only — already merged, ~30min)
-#   2. grpo_rup_mixed_v2         (merge + eval, ~35min)
-#   3. grpo_rup_strong_hard_v2   (merge + eval, ~35min)
-#   4. grpo_rup_strong_mixed_v2  (merge + eval, ~35min)
+#   1. grpo_rup_id_v2            (merge + eval)
+#   2. grpo_rup_edge_v2          (merge + eval)
+#   3. grpo_rup_hard_v2          (already merged, eval only)
+#   4. grpo_rup_mixed_v2         (merge + eval)
+#   5. grpo_rup_strong_id_v2     (merge + eval)
+#   6. grpo_rup_strong_edge_v2   (merge + eval)
+#   7. grpo_rup_strong_hard_v2   (merge + eval)
+#   8. grpo_rup_strong_mixed_v2  (merge + eval)
 #
-#   Estimated total: ~2.5h
+#   Estimated total: ~5h
 #
 # Usage:
-#   bash scripts/gsm_infinity_rl/run_remaining_node_B.sh
+#   bash scripts/gsm_infinity_rl/run_remaining_evals.sh
 # =============================================================================
 
 set -e
@@ -24,18 +28,25 @@ cd "$PROJECT_ROOT"
 
 TOTAL_START=$(date +%s)
 
-EVAL_RUNS=("grpo_rup_hard_v2" "grpo_rup_mixed_v2" "grpo_rup_strong_hard_v2" "grpo_rup_strong_mixed_v2")
-EVAL_CFGS=("grpo_rup_hard_v2" "grpo_rup_mixed_v2" "grpo_rup_strong_hard_v2" "grpo_rup_strong_mixed_v2")
+EVAL_RUNS=(
+    "grpo_rup_id_v2"
+    "grpo_rup_edge_v2"
+    "grpo_rup_hard_v2"
+    "grpo_rup_mixed_v2"
+    "grpo_rup_strong_id_v2"
+    "grpo_rup_strong_edge_v2"
+    "grpo_rup_strong_hard_v2"
+    "grpo_rup_strong_mixed_v2"
+)
 TOTAL=${#EVAL_RUNS[@]}
 
 for ((i=0; i<TOTAL; i++)); do
     RUN="${EVAL_RUNS[$i]}"
-    CFG="${EVAL_CFGS[$i]}"
     RESULTS_DIR="results/gsm_infinity_rl/${RUN}"
 
     LATEST=$(cat "${RESULTS_DIR}/latest_checkpointed_iteration.txt" 2>/dev/null)
     if [ -z "$LATEST" ]; then
-        echo "[B-$((i+1))/$TOTAL] ERROR: No checkpoint for $RUN, skipping."
+        echo "[$((i+1))/$TOTAL] ERROR: No checkpoint for $RUN, skipping."
         continue
     fi
 
@@ -46,7 +57,7 @@ for ((i=0; i<TOTAL; i++)); do
 
     echo ""
     echo "================================================================"
-    echo "[B-$((i+1))/$TOTAL] Eval: ${RUN} — global_step_${LATEST}"
+    echo "[$((i+1))/$TOTAL] Eval: ${RUN} — global_step_${LATEST}"
     echo "================================================================"
 
     if [ -f "${EVAL_DIR}/metrics.jsonl" ]; then
@@ -70,7 +81,7 @@ for ((i=0; i<TOTAL; i++)); do
 
     python3 -m verl.trainer.main_ppo \
         --config-path "$CONFIG_DIR" \
-        --config-name "$CFG" \
+        --config-name "$RUN" \
         actor_rollout_ref.model.path="${HF_DIR}" \
         trainer.val_only=true \
         trainer.val_before_train=true \
@@ -79,7 +90,7 @@ for ((i=0; i<TOTAL; i++)); do
         trainer.experiment_name="${RUN}_step${LATEST}_eval" \
         trainer.logger='[console,local_json]'
 
-    echo "[B-$((i+1))/$TOTAL] ${RUN} eval done."
+    echo "[$((i+1))/$TOTAL] ${RUN} eval done."
 done
 
 TOTAL_END=$(date +%s)
@@ -89,5 +100,5 @@ MINS=$(( (TOTAL_DURATION % 3600) / 60 ))
 
 echo ""
 echo "================================================================"
-echo "Node B complete! Wall time: ${HOURS}h ${MINS}m"
+echo "All 8 evals complete! Wall time: ${HOURS}h ${MINS}m"
 echo "================================================================"

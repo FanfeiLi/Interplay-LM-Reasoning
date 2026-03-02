@@ -1,19 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# NODE A — Run on first 8-GPU node
+# NODE A — Evaluate 4 remaining checkpoints (pass@128)
 #
-#   Training (~7.5h):
-#     1. grpo_rup_id_v2                                         ~2.5h
-#     2. grpo_rup_edge_v2                                       ~5h
+#   1. grpo_rup_id_v2          (merge + eval, ~35min)
+#   2. grpo_rup_edge_v2        (merge + eval, ~35min)
+#   3. grpo_rup_strong_id_v2   (merge + eval, ~35min)
+#   4. grpo_rup_strong_edge_v2 (merge + eval, ~35min)
 #
-#   Evals (~3h):
-#     3. eval grpo_rup_strong_mixed_v2
-#     4. eval grpo_rup_id_v2
-#     5. eval grpo_rup_edge_v2
-#     6. eval grpo_rup_strong_id_v2
-#     7. eval grpo_rup_strong_edge_v2
-#
-#   Estimated total: ~10.5h
+#   Estimated total: ~2.5h
 #
 # Usage:
 #   bash scripts/gsm_infinity_rl/run_remaining_node_A.sh
@@ -29,47 +23,19 @@ CONFIG_DIR="$PROJECT_ROOT/scripts/gsm_infinity_rl/configs"
 cd "$PROJECT_ROOT"
 
 TOTAL_START=$(date +%s)
-JOB=0
-TOTAL=7
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Training
-# ─────────────────────────────────────────────────────────────────────────────
-TRAIN_CONFIGS=("grpo_rup_id_v2" "grpo_rup_edge_v2")
-TRAIN_LABELS=("RUP ID (op=7-10)" "RUP Edge (op=11-14)")
+EVAL_RUNS=("grpo_rup_id_v2" "grpo_rup_edge_v2" "grpo_rup_strong_id_v2" "grpo_rup_strong_edge_v2")
+EVAL_CFGS=("grpo_rup_id_v2" "grpo_rup_edge_v2" "grpo_rup_strong_id_v2" "grpo_rup_strong_edge_v2")
+TOTAL=${#EVAL_RUNS[@]}
 
-for ((i=0; i<${#TRAIN_CONFIGS[@]}; i++)); do
-    JOB=$((JOB+1))
-    CFG="${TRAIN_CONFIGS[$i]}"
-    LABEL="${TRAIN_LABELS[$i]}"
-
-    echo ""
-    echo "================================================================"
-    echo "[A-$JOB/$TOTAL] Train: ${LABEL}"
-    echo "================================================================"
-
-    python3 -m verl.trainer.main_ppo \
-        --config-path "$CONFIG_DIR" \
-        --config-name "$CFG"
-
-    echo "[A-$JOB/$TOTAL] ${CFG} done."
-done
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Evals
-# ─────────────────────────────────────────────────────────────────────────────
-EVAL_RUNS=("grpo_rup_strong_mixed_v2" "grpo_rup_id_v2" "grpo_rup_edge_v2" "grpo_rup_strong_id_v2" "grpo_rup_strong_edge_v2")
-EVAL_CFGS=("grpo_rup_strong_mixed_v2" "grpo_rup_id_v2" "grpo_rup_edge_v2" "grpo_rup_strong_id_v2" "grpo_rup_strong_edge_v2")
-
-for ((i=0; i<${#EVAL_RUNS[@]}; i++)); do
-    JOB=$((JOB+1))
+for ((i=0; i<TOTAL; i++)); do
     RUN="${EVAL_RUNS[$i]}"
     CFG="${EVAL_CFGS[$i]}"
     RESULTS_DIR="results/gsm_infinity_rl/${RUN}"
 
     LATEST=$(cat "${RESULTS_DIR}/latest_checkpointed_iteration.txt" 2>/dev/null)
     if [ -z "$LATEST" ]; then
-        echo "[A-$JOB/$TOTAL] ERROR: No checkpoint for $RUN, skipping."
+        echo "[A-$((i+1))/$TOTAL] ERROR: No checkpoint for $RUN, skipping."
         continue
     fi
 
@@ -80,7 +46,7 @@ for ((i=0; i<${#EVAL_RUNS[@]}; i++)); do
 
     echo ""
     echo "================================================================"
-    echo "[A-$JOB/$TOTAL] Eval: ${RUN} — global_step_${LATEST}"
+    echo "[A-$((i+1))/$TOTAL] Eval: ${RUN} — global_step_${LATEST}"
     echo "================================================================"
 
     if [ -f "${EVAL_DIR}/metrics.jsonl" ]; then
@@ -113,10 +79,9 @@ for ((i=0; i<${#EVAL_RUNS[@]}; i++)); do
         trainer.experiment_name="${RUN}_step${LATEST}_eval" \
         trainer.logger='[console,local_json]'
 
-    echo "[A-$JOB/$TOTAL] ${RUN} eval done."
+    echo "[A-$((i+1))/$TOTAL] ${RUN} eval done."
 done
 
-# ─────────────────────────────────────────────────────────────────────────────
 TOTAL_END=$(date +%s)
 TOTAL_DURATION=$(( TOTAL_END - TOTAL_START ))
 HOURS=$(( TOTAL_DURATION / 3600 ))
