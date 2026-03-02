@@ -1,0 +1,95 @@
+# FineWeb-Edu Qwen2-style Transformer — 100M (non-embedding)
+# Architecture: dim=768, n_layers=12, n_heads=12, n_kv_heads=2
+# Tokenizer: Qwen2.5 (151K vocab), seq_len=2048
+# Data: fineweb_edu_10bt_shuffled
+# Hardware: 8x H100 GPUs
+# Effective batch: 32/GPU × 2 accum × 8 GPUs × 2048 tokens ≈ 1M tokens/step
+
+dump_dir: null
+name: "llama_100M_fineweb"
+steps: 10_000
+seed: 42
+grad_acc_steps: 2
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup: 500
+  lr_min_ratio: 0.1
+  clip: 1.0
+
+distributed:
+  fsdp_type: full_shard
+  compile: true
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+
+model:
+  dim: 768
+  n_layers: 12
+  n_heads: 12
+  n_kv_heads: 2
+  weight_tying: false
+
+data:
+  root_dir: /fast/pmayilvahanan/lm_datasets/
+  sources:
+    fineweb_edu_10bt_shuffled: 1.0
+  batch_size: 32
+  prefetch_size: 1024
+  seq_len: 2048
+  n_views: 2
+  load_async: true
+  add_bos: true
+  add_eos: true
+  tokenizer:
+    name: hf
+    path: /fast/pmayilvahanan/Interplay-LM-Reasoning/model_configs/qwen2_fineweb_100M
+
+profiling:
+  run: false
+
+checkpoint:
+  dump:
+    every: 500
+    keep: 25
+  eval:
+    every: 500
+    keep: -1
+
+logging:
+  freq: 10
+
+eval:
+  harness:
+    compute_loss: true
+    tasks:
+      - hellaswag
+      - piqa
+      - winogrande
+      - arc_easy
+      - arc_challenge
+      - commonsense_qa
+      - openbookqa
+      - task: copa
+        dataset_kwargs:
+          trust_remote_code: true
+      - mmlu
+      - task: social_iqa
+        dataset_kwargs:
+          trust_remote_code: true
+  validation:
+    use_val_from_train_src: false
+    max_steps: 5000
+    root_dir: /fast/pmayilvahanan/lm_datasets/
+    sources:
+      - c4_shuffled
+      - pile_uc_shuffled
+      - fineweb_edu_10bt_shuffled
+      - refineweb_shuffled
+      - slimpajama_shuffled
+  generator:
+    max_tokens: 16384
+    dtype: bf16

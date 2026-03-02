@@ -1,0 +1,38 @@
+# Evaluation config for FineWeb-Edu pretrained models (transformer + mamba)
+# Used for standalone evaluation of checkpoints.
+name: "eval_fineweb"
+
+generator:
+  max_tokens: 16384
+  dtype: bf16
+  temperature: 1.0
+  max_prompt_len: 2048
+
+harness:
+  compute_loss: true
+  tasks:
+    - hellaswag
+    - piqa
+    - winogrande
+    - arc_easy
+    - arc_challenge
+    - commonsense_qa
+    - openbookqa
+    - task: copa
+      dataset_kwargs:
+        trust_remote_code: true
+    - mmlu
+    - task: social_iqa
+      dataset_kwargs:
+        trust_remote_code: true
+
+validation:
+  use_val_from_train_src: false
+  max_steps: 5000
+  root_dir: /fast/pmayilvahanan/lm_datasets/
+  sources:
+    - c4_shuffled
+    - pile_uc_shuffled
+    - fineweb_edu_10bt_shuffled
+    - refineweb_shuffled
+    - slimpajama_shuffled
