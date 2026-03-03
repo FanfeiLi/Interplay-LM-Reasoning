@@ -1,5 +1,6 @@
-# GRPO + RUP config for Mixed (ID+Edge+Hard) on skewed-pretrained model
-# Same as grpo_mixed_v2 but with reward uncertainty predictor
+# GRPO + RUP config for Mixed (op=9-12) on skewed-pretrained model
+# Reward uncertainty predictor with scale=4.8
+# Matches paper Section 3 base: 1 epoch, n=6, outcome reward, token-mean loss
 
 hydra:
   searchpath:
@@ -12,7 +13,6 @@ defaults:
 algorithm:
   adv_estimator: grpo
   use_kl_in_reward: false
-  norm_adv_by_std_in_grpo: true
   reward_uncertainty:
     enable: true
     mode: add_to_reward
@@ -31,7 +31,10 @@ algorithm:
 
 data:
   train_files:
-    - data/rl_finetune/train/mixed/mixed_200k.jsonl
+    - data/composition/heldout/op9-50000.jsonl
+    - data/composition/heldout/op10-50000.jsonl
+    - data/composition/heldout/op11-50000.jsonl
+    - data/composition/heldout/op12-50000.jsonl
   val_files:
     - data/composition_hf/test_small/op2-200.jsonl
     - data/composition_hf/test_small/op3-200.jsonl
@@ -46,6 +49,8 @@ data:
     - data/composition_hf/test_small/op12-200.jsonl
     - data/composition_hf/test_small/op13-200.jsonl
     - data/composition_hf/test_small/op14-200.jsonl
+    - data/composition_hf/test_small/op15-200.jsonl
+    - data/composition_hf/test_small/op16-200.jsonl
     - data/composition_hf/test_small/op17-200.jsonl
     - data/composition_hf/test_small/op18-200.jsonl
     - data/composition_hf/test_small/op19-200.jsonl
@@ -79,10 +84,6 @@ actor_rollout_ref:
     kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
     entropy_coeff: 0.0
-    clip_ratio: 0.2
-    loss_agg_mode: seq-mean-token-mean
-    policy_loss:
-      loss_mode: vanilla
     fsdp_config:
       param_offload: false
       optimizer_offload: false

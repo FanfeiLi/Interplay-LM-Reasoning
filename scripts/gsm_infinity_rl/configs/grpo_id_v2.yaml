@@ -1,5 +1,5 @@
 # GRPO config for ID (op=7-10) on skewed-pretrained model
-# Matches paper §3: ID regime = op=7-10 (4 x 50K = 200K), 1 epoch, n=6
+# Matches paper Section 3: 1 epoch, n=6, outcome reward, token-mean loss
 
 hydra:
   searchpath:
@@ -12,7 +12,6 @@ defaults:
 algorithm:
   adv_estimator: grpo
   use_kl_in_reward: false
-  norm_adv_by_std_in_grpo: true
 
 data:
   train_files:
@@ -34,6 +33,8 @@ data:
     - data/composition_hf/test_small/op12-200.jsonl
     - data/composition_hf/test_small/op13-200.jsonl
     - data/composition_hf/test_small/op14-200.jsonl
+    - data/composition_hf/test_small/op15-200.jsonl
+    - data/composition_hf/test_small/op16-200.jsonl
     - data/composition_hf/test_small/op17-200.jsonl
     - data/composition_hf/test_small/op18-200.jsonl
     - data/composition_hf/test_small/op19-200.jsonl
@@ -67,10 +68,6 @@ actor_rollout_ref:
     kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
     entropy_coeff: 0.0
-    clip_ratio: 0.2
-    loss_agg_mode: seq-mean-token-mean
-    policy_loss:
-      loss_mode: vanilla
     fsdp_config:
       param_offload: false
       optimizer_offload: false

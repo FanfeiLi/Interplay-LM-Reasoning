@@ -5,9 +5,7 @@ Loads metrics from root metrics.jsonl for each run at the final training step,
 computes average pass@k across difficulty ranges for three evaluation regimes:
   - ID (op=2-10)
   - OOD-mid / Edge (op=11-14)
-  - OOD-hard (op=17-20)
-
-Note: ops 15-16 are not evaluated; OOD-hard uses ops 17-20 only.
+  - OOD-hard (op=15-20)
 """
 
 import json
@@ -24,23 +22,24 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "results" / "gsm_infinity
 
 PASS_K_VALUES = [1, 2, 4, 8, 16, 32, 64, 128]
 
-# Difficulty groupings (ops actually evaluated)
+# Difficulty groupings (matching paper Figure 3)
 DIFFICULTY_GROUPS = {
-    "ID (op=2-10)": list(range(2, 11)),       # 2,3,...,10
-    "OOD-mid (op=11-14)": list(range(11, 15)),  # 11,12,13,14
-    "OOD-hard (op=17-20)": list(range(17, 21)), # 17,18,19,20
+    "ID (op=2-10)": list(range(2, 11)),        # 2,3,...,10
+    "OOD-mid (op=11-14)": list(range(11, 15)), # 11,12,13,14
+    "OOD-hard (op=15-20)": list(range(15, 21)), # 15,16,17,18,19,20
 }
 
 # All evaluated ops
 ALL_OPS = sorted(
     DIFFICULTY_GROUPS["ID (op=2-10)"]
     + DIFFICULTY_GROUPS["OOD-mid (op=11-14)"]
-    + DIFFICULTY_GROUPS["OOD-hard (op=17-20)"]
+    + DIFFICULTY_GROUPS["OOD-hard (op=15-20)"]
 )
 
 # Run directories
 ALL_RUNS = [
     "base_model_eval_pass128",
+    "base_model_eval_skewed_pass128",
     # DR-GSPO standard
     "dr_gspo_id",
     "dr_gspo_edge",
@@ -66,6 +65,21 @@ ALL_RUNS = [
     "grpo_edge",
     "grpo_mixed",
     "grpo_hard",
+    # GRPO v2 (skewed pretrain, 1 epoch, n=6, ID=op7-10)
+    "grpo_id_v2",
+    "grpo_edge_v2",
+    "grpo_hard_v2",
+    "grpo_mixed_v2",
+    # GRPO+RUP v2 (scale=4.8)
+    "grpo_rup_id_v2",
+    "grpo_rup_edge_v2",
+    "grpo_rup_hard_v2",
+    "grpo_rup_mixed_v2",
+    # GRPO+RUP strong v2 (scale=24.0)
+    "grpo_rup_strong_id_v2",
+    "grpo_rup_strong_edge_v2",
+    "grpo_rup_strong_hard_v2",
+    "grpo_rup_strong_mixed_v2",
 ]
 
 # Nice display names
@@ -96,6 +110,20 @@ DISPLAY_NAMES = {
     "grpo_edge": "GRPO (Edge)",
     "grpo_mixed": "GRPO (Mixed)",
     "grpo_hard": "GRPO (Hard)",
+    # v2 runs (skewed pretrain)
+    "base_model_eval_skewed_pass128": "Base (skewed)",
+    "grpo_id_v2": "GRPO-v2 (ID)",
+    "grpo_edge_v2": "GRPO-v2 (Edge)",
+    "grpo_hard_v2": "GRPO-v2 (Hard)",
+    "grpo_mixed_v2": "GRPO-v2 (Mixed)",
+    "grpo_rup_id_v2": "GRPO+RUP (ID)",
+    "grpo_rup_edge_v2": "GRPO+RUP (Edge)",
+    "grpo_rup_hard_v2": "GRPO+RUP (Hard)",
+    "grpo_rup_mixed_v2": "GRPO+RUP (Mixed)",
+    "grpo_rup_strong_id_v2": "GRPO+RUP-5x (ID)",
+    "grpo_rup_strong_edge_v2": "GRPO+RUP-5x (Edge)",
+    "grpo_rup_strong_hard_v2": "GRPO+RUP-5x (Hard)",
+    "grpo_rup_strong_mixed_v2": "GRPO+RUP-5x (Mixed)",
 }
 
 # Training data regimes
@@ -120,30 +148,52 @@ DATA_REGIMES = {
     "grpo_edge": "edge",
     "grpo_mixed": "mixed",
     "grpo_hard": "hard",
+    "grpo_id_v2": "id",
+    "grpo_edge_v2": "edge",
+    "grpo_hard_v2": "hard",
+    "grpo_mixed_v2": "mixed",
+    "grpo_rup_id_v2": "id",
+    "grpo_rup_edge_v2": "edge",
+    "grpo_rup_hard_v2": "hard",
+    "grpo_rup_mixed_v2": "mixed",
+    "grpo_rup_strong_id_v2": "id",
+    "grpo_rup_strong_edge_v2": "edge",
+    "grpo_rup_strong_hard_v2": "hard",
+    "grpo_rup_strong_mixed_v2": "mixed",
 }
 
 # Training data op ranges for labels
 DATA_REGIME_OPS = {
     "id": "op=2-10",
     "edge": "op=11-14",
-    "hard": "op=17-20",
-    "mixed": "op=2-20 (mixed)",
+    "hard": "op=15-20",
+    "mixed": "op=9-12 (mixed)",
 }
 
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
+_V2_EVAL_RUNS = {
+    "grpo_id_v2", "grpo_edge_v2", "grpo_hard_v2", "grpo_mixed_v2",
+    "grpo_rup_id_v2", "grpo_rup_edge_v2", "grpo_rup_hard_v2", "grpo_rup_mixed_v2",
+    "grpo_rup_strong_id_v2", "grpo_rup_strong_edge_v2", "grpo_rup_strong_hard_v2",
+    "grpo_rup_strong_mixed_v2",
+}
+
+_BASE_MODEL_RUNS = {"base_model_eval_pass128", "base_model_eval_skewed_pass128"}
+
+
 def _load_metrics_at_step(run_name: str, step: Optional[int] = None) -> dict:
     """
     Load validation metrics for a run at a given step.
 
-    For base_model_eval_pass128, reads the first line of its metrics.jsonl.
-    For RL runs, reads root metrics.jsonl and finds the entry at `step`.
-    If step is None, uses the value from latest_checkpointed_iteration.txt.
+    - base_model_eval_*: reads first line of its metrics.jsonl
+    - v2 runs: reads eval_pass128/metrics.jsonl under the final checkpoint
+    - legacy runs: reads root metrics.jsonl and finds the entry at `step`
     """
     run_dir = RESULTS_DIR / run_name
 
-    if run_name == "base_model_eval_pass128":
+    if run_name in _BASE_MODEL_RUNS:
         metrics_path = run_dir / "metrics.jsonl"
         with open(metrics_path) as f:
             data = json.loads(f.readline())
@@ -153,6 +203,13 @@ def _load_metrics_at_step(run_name: str, step: Optional[int] = None) -> dict:
     if step is None:
         iter_file = run_dir / "latest_checkpointed_iteration.txt"
         step = int(iter_file.read_text().strip())
+
+    if run_name in _V2_EVAL_RUNS:
+        eval_metrics = run_dir / f"global_step_{step}" / "eval_pass128" / "metrics.jsonl"
+        if eval_metrics.exists():
+            with open(eval_metrics) as f:
+                data = json.loads(f.readline())
+            return data["metrics"]
 
     metrics_path = run_dir / "metrics.jsonl"
     with open(metrics_path) as f:
