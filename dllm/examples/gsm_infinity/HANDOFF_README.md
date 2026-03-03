@@ -38,24 +38,101 @@ export SHARED_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
 
 ### 1c. Set up the Python environment
 
+The project spans multiple modules (`dllm/`, `LLaMA-Factory/`, `lingua/`,
+`gsm_infinite/`, `analyze/`, `scripts/`) each with their own dependencies.
+A comprehensive `requirements.txt` at the repo root captures everything.
+
+#### Step 1: Load HPC CUDA modules
+
+These must be loaded **before** activating the venv (and every time you open
+a new shell). The cluster uses the `module` system:
+
 ```bash
-# Create a venv (once)
+module load cuda/12.1
+module load cudnn/8.9.1-cu12.x
+```
+
+#### Step 2: Create and activate the venv
+
+```bash
 cd $YOUR_ROOT
 python3 -m venv gsm_pretrain
 source gsm_pretrain/bin/activate
+pip install --upgrade pip setuptools wheel
+```
 
-# Install dependencies
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-pip install transformers accelerate datasets wandb tqdm scipy seaborn
+#### Step 3: Install PyTorch (CUDA 12.1, H100-optimized)
 
-# Install dLLM in editable mode
+PyTorch must be installed **before** the requirements file (some packages
+depend on torch at install time):
+
+```bash
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu121
+```
+
+#### Step 4: Install all Python dependencies
+
+```bash
+cd $YOUR_ROOT
+pip install -r requirements.txt
+```
+
+#### Step 5: Install editable packages
+
+```bash
+# dLLM (diffusion language modeling)
 cd $YOUR_ROOT/dllm
 pip install -e .
 
-# Verify
+# LLaMA-Factory (transformer baselines)
+cd $YOUR_ROOT/LLaMA-Factory
+pip install -e ".[torch,deepspeed,metrics]"
+
+# gsm_infinite (data generation / evaluation benchmark)
+cd $YOUR_ROOT/gsm_infinite
+pip install -e .
+```
+
+#### Step 6: Install flash-attention (recommended for H100)
+
+```bash
+pip install flash-attn --no-build-isolation
+```
+
+#### Step 7: Verify
+
+```bash
+python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}, Devices: {torch.cuda.device_count()}')"
 python -c "import dllm; print('dllm OK')"
 python -c "import transformers; print('transformers OK')"
+python -c "import llamafactory; print('LLaMA-Factory OK')"
 ```
+
+#### Quick activation (subsequent sessions)
+
+After the initial setup, you just need to load modules + activate:
+
+```bash
+module load cuda/12.1
+module load cudnn/8.9.1-cu12.x
+source $YOUR_ROOT/gsm_pretrain/bin/activate
+export PYTHONPATH="$YOUR_ROOT:$PYTHONPATH"
+export WANDB_PROJECT="gsm-infinity-pretrain"
+
+# H100 multi-GPU optimizations
+export NCCL_P2P_DISABLE=0
+export NCCL_IB_DISABLE=0
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+```
+
+Or copy and adapt the existing `activate_pretrain_env.sh` at the repo root.
+
+> **Note on lingua/**: If you need to run lingua experiments (Mamba, MTP),
+> lingua has its own conda-based setup — see `lingua/setup/create_env.sh`.
+> It additionally requires `xformers`, and for Mamba: `causal-conv1d` and
+> `mamba-ssm` (installed from git). These are **not** included in the shared
+> venv because they can conflict with dLLM dependencies.
 
 ### 1d. Update hardcoded paths in scripts
 
