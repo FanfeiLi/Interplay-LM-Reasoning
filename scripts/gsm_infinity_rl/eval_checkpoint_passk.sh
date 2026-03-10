@@ -8,7 +8,7 @@ set -ex
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}
 
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 cd "$PROJECT_ROOT"
 
 # Parse arguments

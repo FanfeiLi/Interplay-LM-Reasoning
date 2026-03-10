@@ -225,7 +225,7 @@ def main():
     parser = argparse.ArgumentParser(description="Pass@128 evaluation for MTP on GSM-Infinity")
     parser.add_argument("--ckpt_dir", type=str, required=True, help="Lingua checkpoint directory")
     parser.add_argument("--test_dir", type=str,
-                        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small")
+                        default="/fast/fli/Interplay-LM-Reasoning/data/composition_hf/test_small")
     parser.add_argument("--n_samples", type=int, default=128)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--max_gen_len", type=int, default=1024)

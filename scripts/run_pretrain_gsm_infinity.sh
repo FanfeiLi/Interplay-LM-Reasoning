@@ -13,7 +13,7 @@ set -e
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 CONFIG="${PROJECT_ROOT}/LLaMA-Factory/examples/gsm_infinity/pt_op2-10_10B_alltemps.yaml"
 RUN_NAME="pt_op2-10_10B_alltemps_$(date +%Y%m%d_%H%M%S)"
 
@@ -53,7 +53,7 @@ module load cuda/12.1
 module load cudnn/8.9.1-cu12.x
 
 # Activate virtual environment
-source "${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+source "/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 
 # Set PYTHONPATH
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"

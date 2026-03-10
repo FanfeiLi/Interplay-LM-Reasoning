@@ -42,9 +42,9 @@ BLOCK_SIZE_BD3LM="${BLOCK_SIZE_BD3LM:-16}"
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
-VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+VENV="/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 TEST_DIR="${PROJECT_ROOT}/data/composition_hf/test_small"
 
 # =============================================================================

@@ -5,24 +5,24 @@ For each test example, generates N completions using the DLLM sampler,
 extracts answers, and computes pass@k for k in {1,2,4,8,16,32,64,128}.
 
 Usage:
-    source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
-    cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
+    source /fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+    cd /fast/fli/Interplay-LM-Reasoning/dllm
 
     # A2D-MDLM evaluation
     python examples/gsm_infinity/eval_pass128.py \
         --model_path saves/gsm_infinity/a2d_mdlm_100M/checkpoint-final \
         --sampler_type mdlm \
-        --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
+        --test_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/test_small \
         --n_samples 128 \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_mdlm_100M
+        --output_dir /fast/fli/Interplay-LM-Reasoning/results/dllm_eval/a2d_mdlm_100M
 
     # A2D-BD3LM evaluation
     python examples/gsm_infinity/eval_pass128.py \
         --model_path saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final \
         --sampler_type bd3lm \
-        --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
+        --test_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/test_small \
         --n_samples 128 \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_bd3lm_100M
+        --output_dir /fast/fli/Interplay-LM-Reasoning/results/dllm_eval/a2d_bd3lm_100M
 """
 
 import argparse
@@ -346,7 +346,7 @@ def main():
     )
     parser.add_argument(
         "--test_dir", type=str,
-        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small",
+        default="/fast/fli/Interplay-LM-Reasoning/data/composition_hf/test_small",
         help="Directory containing test JSONL files",
     )
     parser.add_argument(

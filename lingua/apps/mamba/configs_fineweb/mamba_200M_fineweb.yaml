@@ -39,7 +39,7 @@ model:
     A_init_max: 2
 
 data:
-  root_dir: /fast/pmayilvahanan/lm_datasets/
+  root_dir: /fast/fli/lm_datasets/
   sources:
     fineweb_edu_10bt_shuffled: 1.0
   batch_size: 16
@@ -51,7 +51,7 @@ data:
   add_eos: true
   tokenizer:
     name: hf
-    path: /fast/pmayilvahanan/Interplay-LM-Reasoning/model_configs/qwen2_fineweb_200M
+    path: /fast/fli/Interplay-LM-Reasoning/model_configs/qwen2_fineweb_200M
 
 profiling:
   run: false
@@ -88,7 +88,7 @@ eval:
   validation:
     use_val_from_train_src: false
     max_steps: 5000
-    root_dir: /fast/pmayilvahanan/lm_datasets/
+    root_dir: /fast/fli/lm_datasets/
     sources:
       - c4_shuffled
       - pile_uc_shuffled

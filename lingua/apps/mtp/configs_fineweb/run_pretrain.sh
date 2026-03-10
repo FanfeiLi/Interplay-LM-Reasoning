@@ -9,22 +9,22 @@
 #
 # Environment variables:
 #   GPU_LIST       GPU IDs (default: 0,1,2,3,4,5,6,7)
-#   DATA_DIR       Root data directory (default: /fast/pmayilvahanan/lm_datasets/)
+#   DATA_DIR       Root data directory (default: /fast/fli/lm_datasets/)
 #   WANDB_PROJECT  Wandb project (default: lingua-fineweb)
 # =============================================================================
 
 set -e
 
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 LINGUA_ROOT="${PROJECT_ROOT}/lingua"
-VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+VENV="/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SIZE="${1:-400M}"
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
 IFS=',' read -ra GPU_ARRAY <<< "${GPU_LIST}"
 NPROC="${#GPU_ARRAY[@]}"
-DATA_DIR="${DATA_DIR:-/fast/pmayilvahanan/lm_datasets/}"
+DATA_DIR="${DATA_DIR:-/fast/fli/lm_datasets/}"
 
 CONFIG="${SCRIPT_DIR}/mtp_${SIZE}_fineweb.yaml"
 RUN_NAME="mtp_${SIZE}_fineweb_$(date +%Y%m%d_%H%M%S)"

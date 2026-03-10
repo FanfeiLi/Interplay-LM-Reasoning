@@ -37,10 +37,10 @@ dllm/model_configs/a2d_qwen2_100M/
 
 ```bash
 # Activate the virtual environment
-source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+source /fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
 
 # Install dLLM (if not already installed)
-cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
+cd /fast/fli/Interplay-LM-Reasoning/dllm
 pip install -e .
 
 # Initialize lm-evaluation-harness submodule
@@ -53,7 +53,7 @@ pip install -e "lm-evaluation-harness"
 Convert the raw composition_hf JSONL files into a HuggingFace Arrow dataset:
 
 ```bash
-cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
+cd /fast/fli/Interplay-LM-Reasoning/dllm
 bash examples/gsm_infinity/run_pretrain.sh preprocess
 ```
 
@@ -61,8 +61,8 @@ Or run directly:
 
 ```bash
 python examples/gsm_infinity/preprocess_data.py \
-    --data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train \
-    --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm \
+    --data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train \
+    --output_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf_dllm \
     --op_min 2 --op_max 10
 ```
 
@@ -77,7 +77,7 @@ and saves as a HuggingFace dataset at `data/composition_hf_dllm/`.
 #### A2D-MDLM (8 GPUs)
 
 ```bash
-cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
+cd /fast/fli/Interplay-LM-Reasoning/dllm
 bash examples/gsm_infinity/run_pretrain.sh mdlm
 ```
 
@@ -95,7 +95,7 @@ accelerate launch \
     --num_processes 8 \
     examples/gsm_infinity/pt_mdlm.py \
     --model_name_or_path "model_configs/a2d_qwen2_100M" \
-    --dataset_args "/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm" \
+    --dataset_args "/fast/fli/Interplay-LM-Reasoning/data/composition_hf_dllm" \
     --load_preprocessed_data True \
     --max_length 2048 \
     --max_steps 10000 \
@@ -108,7 +108,7 @@ accelerate launch \
 #### A2D-BD3LM (8 GPUs)
 
 ```bash
-cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
+cd /fast/fli/Interplay-LM-Reasoning/dllm
 bash examples/gsm_infinity/run_pretrain.sh bd3lm
 ```
 
@@ -120,7 +120,7 @@ accelerate launch \
     --num_processes 8 \
     examples/gsm_infinity/pt_bd3lm.py \
     --model_name_or_path "model_configs/a2d_qwen2_100M" \
-    --dataset_args "/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm" \
+    --dataset_args "/fast/fli/Interplay-LM-Reasoning/data/composition_hf_dllm" \
     --load_preprocessed_data True \
     --max_length 2048 \
     --max_steps 10000 \
@@ -146,7 +146,7 @@ bash examples/gsm_infinity/run_pretrain.sh all
 bash examples/gsm_infinity/run_eval.sh \
     saves/gsm_infinity/a2d_mdlm_100M/checkpoint-final \
     mdlm \
-    /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_mdlm_100M
+    /fast/fli/Interplay-LM-Reasoning/results/dllm_eval/a2d_mdlm_100M
 ```
 
 #### Evaluate A2D-BD3LM
@@ -155,7 +155,7 @@ bash examples/gsm_infinity/run_eval.sh \
 bash examples/gsm_infinity/run_eval.sh \
     saves/gsm_infinity/a2d_bd3lm_100M/checkpoint-final \
     bd3lm \
-    /fast/pmayilvahanan/Interplay-LM-Reasoning/results/dllm_eval/a2d_bd3lm_100M
+    /fast/fli/Interplay-LM-Reasoning/results/dllm_eval/a2d_bd3lm_100M
 ```
 
 #### Custom evaluation parameters
@@ -171,7 +171,7 @@ Or run the Python script directly:
 python examples/gsm_infinity/eval_pass128.py \
     --model_path <checkpoint_path> \
     --sampler_type mdlm \
-    --test_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small \
+    --test_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/test_small \
     --n_samples 128 \
     --batch_size 16 \
     --max_new_tokens 1024 \

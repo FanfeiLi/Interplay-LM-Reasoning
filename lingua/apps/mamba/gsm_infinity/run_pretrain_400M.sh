@@ -23,9 +23,9 @@ set -e
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 LINGUA_ROOT="${PROJECT_ROOT}/lingua"
-VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+VENV="/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # GPU Configuration

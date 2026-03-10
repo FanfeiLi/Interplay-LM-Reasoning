@@ -34,7 +34,7 @@ import dllm
 
 logger = dllm.utils.get_default_logger(__name__)
 
-PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/fast/pmayilvahanan/Interplay-LM-Reasoning")
+PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/fast/fli/Interplay-LM-Reasoning")
 
 
 @dataclass
@@ -47,6 +47,7 @@ class ModelArguments(dllm.utils.ModelArguments):
 @dataclass
 class DataArguments(dllm.utils.DataArguments):
     training_data_dir: str = field(
+        default="",
         metadata={"help": (
             "Path to local directory containing TinyStories training parquets "
             "(downloaded from gs://transformer-ngrams/TinyStories/training_data/). "
@@ -85,12 +86,13 @@ class TrainingArguments(dllm.core.trainers.MDLMConfig):
     bf16: bool = True
     ddp_timeout: int = 7200
     logging_steps: int = 10
-    save_steps: int = 500
-    save_total_limit: int = 25
+    save_steps: int = 100
+    save_total_limit: int = 50
     eval_strategy: str = "no"
     report_to: str = "wandb"
     run_name: str = "a2d_mdlm_tinystories_100M"
     gradient_checkpointing: bool = False
+    seed: int = 42
 
 
 BOS_TOKEN_ID = 1  # matches paper: BOS_TOKEN = 1

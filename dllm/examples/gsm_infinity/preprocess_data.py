@@ -7,19 +7,19 @@ Arrow file on disk. The main process concatenates without holding all
 data in RAM.
 
 Usage:
-    source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
-    cd /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm
+    source /fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+    cd /fast/fli/Interplay-LM-Reasoning/dllm
 
     # Full run:
     python examples/gsm_infinity/preprocess_data.py \
-        --data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train \
-        --tokenizer_path /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized \
+        --data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train \
+        --tokenizer_path /fast/fli/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M \
+        --output_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized \
         --op_min 2 --op_max 10 --num_workers 16
 
     # Resume from existing _tmp_shards (skip tokenization, just concat+save):
     python examples/gsm_infinity/preprocess_data.py \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized \
+        --output_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized \
         --resume --num_save_proc 16
 """
 
@@ -175,15 +175,15 @@ def main():
     )
     parser.add_argument(
         "--data_dir", type=str,
-        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train",
+        default="/fast/fli/Interplay-LM-Reasoning/data/composition_hf/train",
     )
     parser.add_argument(
         "--tokenizer_path", type=str,
-        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M",
+        default="/fast/fli/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M",
     )
     parser.add_argument(
         "--output_dir", type=str,
-        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized",
+        default="/fast/fli/Interplay-LM-Reasoning/data/composition_hf_dllm_tokenized",
     )
     parser.add_argument("--op_min", type=int, default=2)
     parser.add_argument("--op_max", type=int, default=10)

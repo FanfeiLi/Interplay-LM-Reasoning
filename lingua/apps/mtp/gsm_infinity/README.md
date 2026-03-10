@@ -34,9 +34,9 @@ lingua/apps/gsm_infinity/
 ### Prerequisites
 
 ```bash
-source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+source /fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
 
-cd /fast/pmayilvahanan/Interplay-LM-Reasoning/lingua
+cd /fast/fli/Interplay-LM-Reasoning/lingua
 pip install -e .
 ```
 

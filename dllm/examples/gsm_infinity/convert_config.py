@@ -9,8 +9,8 @@ This script:
 
 Usage:
     python dllm/examples/gsm_infinity/convert_config.py \
-        --src_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/model_configs/qwen2_100M \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M
+        --src_dir /fast/fli/Interplay-LM-Reasoning/model_configs/qwen2_100M \
+        --output_dir /fast/fli/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M
 """
 
 import argparse
@@ -28,13 +28,13 @@ def main():
     parser.add_argument(
         "--src_dir",
         type=str,
-        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/model_configs/qwen2_100M",
+        default="/fast/fli/Interplay-LM-Reasoning/model_configs/qwen2_100M",
         help="Source Qwen2 100M config directory",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M",
+        default="/fast/fli/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M",
         help="Output directory for A2D-Qwen2 config",
     )
     args = parser.parse_args()

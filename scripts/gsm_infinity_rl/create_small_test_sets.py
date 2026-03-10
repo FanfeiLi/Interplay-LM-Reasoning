@@ -12,8 +12,8 @@ import random
 
 random.seed(42)
 
-SRC_DIR = "/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test"
-DST_DIR = "/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/test_small"
+SRC_DIR = "/fast/fli/Interplay-LM-Reasoning/data/composition_hf/test"
+DST_DIR = "/fast/fli/Interplay-LM-Reasoning/data/composition_hf/test_small"
 SAMPLES_PER_OP = 200
 
 os.makedirs(DST_DIR, exist_ok=True)

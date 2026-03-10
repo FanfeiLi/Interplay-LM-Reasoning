@@ -5,7 +5,7 @@
 # Usage:
 #   bash scripts/prepare_fineweb_data.sh [DATA_DIR]
 #
-# DATA_DIR defaults to /fast/pmayilvahanan/lm_datasets
+# DATA_DIR defaults to /fast/fli/lm_datasets
 # The script produces: DATA_DIR/fineweb_edu_10bt_shuffled/
 #   ├── fineweb_edu_10bt.chunk.00.jsonl .. chunk.31.jsonl
 #   └── fineweb_edu_10bt.val.jsonl
@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DATA_DIR="${1:-/fast/pmayilvahanan/lm_datasets}"
+DATA_DIR="${1:-/fast/fli/lm_datasets}"
 
 echo "=== FineWeb-Edu 10BT Data Preparation ==="
 echo "Project root: ${PROJECT_ROOT}"

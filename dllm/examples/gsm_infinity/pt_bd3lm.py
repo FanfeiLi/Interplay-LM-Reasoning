@@ -9,7 +9,7 @@ Examples:
     accelerate launch \
         --config_file scripts/accelerate_configs/zero2.yaml \
         examples/gsm_infinity/pt_bd3lm.py \
-        --raw_data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train
+        --raw_data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train
 """
 
 import functools
@@ -24,7 +24,7 @@ import dllm
 
 logger = dllm.utils.get_default_logger(__name__)
 
-PROJECT_ROOT = "/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT = "/fast/fli/Interplay-LM-Reasoning"
 
 
 @dataclass
@@ -82,7 +82,7 @@ class TrainingArguments(dllm.core.trainers.BD3LMConfig):
     per_device_train_batch_size: int = 32
     gradient_accumulation_steps: int = 2
     # BD3LM specific
-    block_size: int = 32
+    block_size: int = 16
     # Precision
     bf16: bool = True
     # Long timeout so rank 0 can finish data tokenization on first run

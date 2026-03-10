@@ -11,7 +11,7 @@
 
 set -e
 
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 cd "$PROJECT_ROOT"
 
 RESULTS_DIR=$1

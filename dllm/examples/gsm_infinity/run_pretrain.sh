@@ -20,9 +20,9 @@ set -e
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/home/fli/dllm/Interplay-LM-Reasoning"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
-VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+VENV="/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 
 # GPU Configuration
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"

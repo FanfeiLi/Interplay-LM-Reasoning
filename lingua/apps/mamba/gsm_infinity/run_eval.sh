@@ -13,7 +13,7 @@
 
 set -e
 
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 LINGUA_ROOT="${PROJECT_ROOT}/lingua"
 
 CKPT_DIR="${1:?Error: checkpoint directory required}"
@@ -25,7 +25,7 @@ MAX_TOKENS="${MAX_TOKENS:-16384}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 TEST_DIR="${TEST_DIR:-$PROJECT_ROOT/data/composition_hf/test_small}"
 
-source "${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+source "/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 export PYTHONPATH="${PROJECT_ROOT}:${LINGUA_ROOT}:${PYTHONPATH}"
 
 cd "${LINGUA_ROOT}"

@@ -18,8 +18,8 @@ Output directory layout (compatible with lingua data loader):
 
 Usage:
     python -m apps.gsm_infinity.preprocess_data \
-        --raw_data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train \
-        --output_dir   /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_lingua/gsm_infinity \
+        --raw_data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train \
+        --output_dir   /fast/fli/Interplay-LM-Reasoning/data/composition_lingua/gsm_infinity \
         --op_min 2 --op_max 10 \
         --token_budget 10B \
         --lines_per_chunk 10000 \

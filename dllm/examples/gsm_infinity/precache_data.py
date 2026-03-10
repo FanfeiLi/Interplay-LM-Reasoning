@@ -6,9 +6,9 @@ tokenizes, and saves to disk. Multi-GPU training then loads instantly.
 
 Usage:
     python examples/gsm_infinity/precache_data.py \
-        --raw_data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train \
-        --tokenizer_path /fast/pmayilvahanan/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M \
-        --output_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf_dllm_10B \
+        --raw_data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train \
+        --tokenizer_path /fast/fli/Interplay-LM-Reasoning/dllm/model_configs/a2d_qwen2_100M \
+        --output_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf_dllm_10B \
         --token_budget 10B --op_min 2 --op_max 10
 """
 

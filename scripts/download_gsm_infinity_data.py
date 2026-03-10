@@ -176,7 +176,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="/fast/pmayilvahanan/Interplay-LM-Reasoning/data",
+        default="/fast/fli/Interplay-LM-Reasoning/data",
         help="Output directory for prepared data",
     )
     parser.add_argument(

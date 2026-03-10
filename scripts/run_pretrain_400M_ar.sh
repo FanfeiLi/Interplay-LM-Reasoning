@@ -13,7 +13,7 @@ set -e
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 CONFIG="${PROJECT_ROOT}/LLaMA-Factory/examples/gsm_infinity/pt_400M.yaml"
 RUN_NAME="pt_400M_ar_$(date +%Y%m%d_%H%M%S)"
 
@@ -49,7 +49,7 @@ echo ""
 module load cuda/12.1 2>/dev/null || true
 module load cudnn/8.9.1-cu12.x 2>/dev/null || true
 
-source "${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+source "/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 

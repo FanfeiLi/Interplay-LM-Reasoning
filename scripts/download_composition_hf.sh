@@ -9,7 +9,7 @@
 set -e
 
 # Configuration
-OUTPUT_DIR="${1:-/fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf}"
+OUTPUT_DIR="${1:-/fast/fli/Interplay-LM-Reasoning/data/composition_hf}"
 MIN_OP="${2:-2}"
 MAX_OP="${3:-10}"
 REPO_ID="Interplay-LM-Reasoning/composition"

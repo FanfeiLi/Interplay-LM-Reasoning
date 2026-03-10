@@ -19,7 +19,7 @@ finetuning_type: full
 
 ### Dataset Configuration
 dataset: composition_hf
-dataset_dir: /fast/pmayilvahanan/Interplay-LM-Reasoning/data
+dataset_dir: /fast/fli/Interplay-LM-Reasoning/data
 cutoff_len: 2048
 overwrite_cache: true
 preprocessing_num_workers: 16
@@ -61,7 +61,7 @@ resume_from_checkpoint: null
 eval_strategy: "no"
 
 ### Task-specific Configuration (for data loading)
-preset_path: /fast/pmayilvahanan/Interplay-LM-Reasoning/data/PRESET.json
+preset_path: /fast/fli/Interplay-LM-Reasoning/data/PRESET.json
 task_name: composition-10B/op_level
 task_setting: id2-10_uniform
 task_token_count: 10B

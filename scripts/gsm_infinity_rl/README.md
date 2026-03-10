@@ -143,7 +143,7 @@ Common parameters: `train_batch_size: 1024`, `lr: 1e-6`, `ppo_mini_batch_size: 2
 
 All experiments use:
 ```
-/fast/pmayilvahanan/Interplay-LM-Reasoning/LLaMA-Factory/saves/gsm_infinity/pt_op2-10_10B_alltemps_20260213_233838
+/fast/fli/Interplay-LM-Reasoning/LLaMA-Factory/saves/gsm_infinity/pt_op2-10_10B_alltemps_20260213_233838
 ```
 
 ## Analyzing Results

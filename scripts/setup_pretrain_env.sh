@@ -11,7 +11,7 @@ set -e  # Exit on error
 
 # Configuration
 ENV_NAME="gsm_pretrain"
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 PYTHON_VERSION="3.10"
 
 echo "=============================================="
@@ -90,8 +90,8 @@ cat > "$PROJECT_ROOT/activate_pretrain_env.sh" << 'EOF'
 # Quick activation script for GSM pre-training environment (8x H100)
 module load cuda/12.1
 module load cudnn/8.9.1-cu12.x
-source /fast/pmayilvahanan/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
-export PYTHONPATH="/fast/pmayilvahanan/Interplay-LM-Reasoning:$PYTHONPATH"
+source /fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
+export PYTHONPATH="/fast/fli/Interplay-LM-Reasoning:$PYTHONPATH"
 export WANDB_PROJECT="gsm-infinity-pretrain"
 
 # H100 optimizations

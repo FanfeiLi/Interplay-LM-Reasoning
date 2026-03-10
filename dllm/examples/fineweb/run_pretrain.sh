@@ -29,9 +29,9 @@ set -e
 # =============================================================================
 # Configuration
 # =============================================================================
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
-VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+VENV="/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
 IFS=',' read -ra GPU_ARRAY <<< "${GPU_LIST}"

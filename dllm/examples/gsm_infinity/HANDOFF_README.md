@@ -25,7 +25,7 @@ Throughout this guide, two root directories matter:
 | Variable | Path | What it is |
 |----------|------|------------|
 | `YOUR_ROOT` | `/fast/<your_username>/Interplay-LM-Reasoning` | **Your clone** — code, new saves, new results |
-| `SHARED_ROOT` | `/fast/pmayilvahanan/Interplay-LM-Reasoning` | **Prasanna's checkout** — read-only data, existing checkpoints & eval results |
+| `SHARED_ROOT` | `/fast/fli/Interplay-LM-Reasoning` | **Prasanna's checkout** — read-only data, existing checkpoints & eval results |
 
 All data and existing checkpoints live under `SHARED_ROOT` and are **world-readable**.
 Your new training runs and eval results will go under `YOUR_ROOT`.
@@ -33,7 +33,7 @@ Your new training runs and eval results will go under `YOUR_ROOT`.
 Add to your `~/.bashrc` (or run each session):
 ```bash
 export YOUR_ROOT="/fast/<your_username>/Interplay-LM-Reasoning"
-export SHARED_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+export SHARED_ROOT="/fast/fli/Interplay-LM-Reasoning"
 ```
 
 ### 1c. Set up the Python environment
@@ -145,7 +145,7 @@ You need to update them for your clone. In each of these files, change the
 
 ```bash
 # In both files, change:
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 # To:
 PROJECT_ROOT="/fast/<your_username>/Interplay-LM-Reasoning"
 ```

@@ -23,10 +23,10 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 LINGUA_ROOT="${PROJECT_ROOT}/lingua"
 DLLM_ROOT="${PROJECT_ROOT}/dllm"
-VENV="${PROJECT_ROOT}/gsm_pretrain/bin/activate"
+VENV="/fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate"
 
 RUN_TYPE="${1:?Error: Run type required (transformer, mamba, mtp, mdlm, bd3lm)}"
 RUN_DIR="${2:?Error: Run directory required}"

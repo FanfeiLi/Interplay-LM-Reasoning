@@ -8,21 +8,21 @@ Data loading options (in priority order):
 
 Option 1 is recommended — it works just like LLaMA-Factory:
     accelerate launch ... examples/gsm_infinity/pt_mdlm.py \
-        --raw_data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train
+        --raw_data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train
 
 Examples:
     # 1 GPU (testing):
     accelerate launch \
         --config_file scripts/accelerate_configs/ddp.yaml --num_processes 1 \
         examples/gsm_infinity/pt_mdlm.py \
-        --raw_data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train \
+        --raw_data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train \
         --max_steps 100 --per_device_train_batch_size 4
 
     # 8 GPUs (ZeRO-2):
     accelerate launch \
         --config_file scripts/accelerate_configs/zero2.yaml \
         examples/gsm_infinity/pt_mdlm.py \
-        --raw_data_dir /fast/pmayilvahanan/Interplay-LM-Reasoning/data/composition_hf/train
+        --raw_data_dir /fast/fli/Interplay-LM-Reasoning/data/composition_hf/train
 """
 
 import functools
@@ -37,7 +37,7 @@ import dllm
 
 logger = dllm.utils.get_default_logger(__name__)
 
-PROJECT_ROOT = "/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT = "/fast/fli/Interplay-LM-Reasoning"
 
 
 @dataclass

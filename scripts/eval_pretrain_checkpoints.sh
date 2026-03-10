@@ -21,7 +21,7 @@
 #       ./scripts/eval_pretrain_checkpoints.sh mamba <run_dir>
 # =============================================================================
 
-PROJECT_ROOT="/fast/pmayilvahanan/Interplay-LM-Reasoning"
+PROJECT_ROOT="/fast/fli/Interplay-LM-Reasoning"
 cd "$PROJECT_ROOT"
 
 RUN_TYPE="${1:?Error: Run type required (mdlm, bd3lm, transformer, mamba, or mtp)}"
@@ -198,7 +198,7 @@ TOTAL=${#CHECKPOINT_LIST[@]}
 echo "Found $TOTAL checkpoints."
 
 # Activate environment and set paths
-source "$PROJECT_ROOT/gsm_pretrain/bin/activate"
+source /fast/fli/Interplay-LM-Reasoning/gsm_pretrain/bin/activate
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/dllm:$PROJECT_ROOT/lingua:$PYTHONPATH"
 
 # For BD3LM, auto-detect the training block_size from the first checkpoint's

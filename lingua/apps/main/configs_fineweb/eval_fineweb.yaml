@@ -29,7 +29,7 @@ harness:
 validation:
   use_val_from_train_src: false
   max_steps: 5000
-  root_dir: /fast/pmayilvahanan/lm_datasets/
+  root_dir: /fast/fli/lm_datasets/
   sources:
     - c4_shuffled
     - pile_uc_shuffled
