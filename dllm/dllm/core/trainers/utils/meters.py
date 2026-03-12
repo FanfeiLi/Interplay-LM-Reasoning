@@ -101,3 +101,15 @@ class OnEvaluateMetricsCallback(BaseMetricsCallback):
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         self.log_and_print(state, splits=("train", "eval"))
         return control
+
+
+class OnLogMetricsCallback(BaseMetricsCallback):
+    """Logs train NLL/PPL at every logging_steps, eval metrics on evaluate."""
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        self.log_and_print(state, splits=("train",))
+        return control
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        self.log_and_print(state, splits=("eval",))
+        return control

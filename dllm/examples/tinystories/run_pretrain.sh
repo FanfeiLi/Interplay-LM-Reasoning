@@ -92,11 +92,11 @@ accelerate launch \
     --model_name_or_path "${PROJECT_ROOT}/dllm/model_configs/a2d_qwen2_tinystories_100M" \
     --training_data_dir "${TRAINING_DATA_DIR}" \
     --max_length 2048 \
-    --num_train_epochs 4 \
-    --learning_rate 1e-4 \
+    --num_train_epochs 8 \
+    --learning_rate 3e-4 \
     --weight_decay 0.1 \
     --lr_scheduler_type cosine \
-    --warmup_ratio 0.05 \
+    --warmup_ratio 0.1 \
     --max_grad_norm 1.0 \
     --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 2 \

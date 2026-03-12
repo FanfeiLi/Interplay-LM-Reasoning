@@ -31,6 +31,7 @@ import torch
 import transformers
 
 import dllm
+from dllm.core.schedulers import CosineAlphaScheduler
 
 logger = dllm.utils.get_default_logger(__name__)
 
@@ -74,12 +75,12 @@ class TrainingArguments(dllm.core.trainers.MDLMConfig):
     # Compute as: ceil(total_tokens / seq_length) * 4_epochs / (batch_per_step)
     # where batch_per_step = per_device_train_batch_size * num_gpus * gradient_accumulation_steps
     max_steps: int = -1           # -1 means use num_train_epochs instead
-    num_train_epochs: int = 4     # match n-gram paper (arxiv 2407.12034)
-    # --- identical to colleague's gsm_infinity runs ---
-    learning_rate: float = 1e-4
+    num_train_epochs: int = 10    # diffusion LMs need more epochs (each step trains masked subset only)
+    # --- tuned for MDLM (following MDLM / LLaDA papers) ---
+    learning_rate: float = 3e-4
     weight_decay: float = 0.1
     lr_scheduler_type: str = "cosine"
-    warmup_ratio: float = 0.05
+    warmup_ratio: float = 0.1
     max_grad_norm: float = 1.0
     per_device_train_batch_size: int = 64
     gradient_accumulation_steps: int = 1
@@ -179,19 +180,39 @@ def train():
 
     # ----- Training ---------------------------------------------------------------
     accelerate.PartialState().wait_for_everyone()
+
+    noise_scheduler = CosineAlphaScheduler()
+    logger.info(f"Noise scheduler: {noise_scheduler.__class__.__name__}")
     logger.info("Start MDLM pre-training on TinyStories...")
+
     trainer = dllm.core.trainers.MDLMTrainer(
         model=model,
         tokenizer=tokenizer,
         train_dataset=split["train"],
         eval_dataset=split["test"],
         args=training_args,
+        scheduler=noise_scheduler,
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer,
             return_tensors="pt",
             padding=True,
         ),
     )
+
+    # Log diffusion-specific hyperparams to W&B
+    if trainer.is_world_process_zero():
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.config.update({
+                    "noise_scheduler": noise_scheduler.__class__.__name__,
+                    "time_epsilon": training_args.time_epsilon,
+                    "loss_weight_type": training_args.loss_weight_type,
+                    "loss_norm_type": training_args.loss_norm_type,
+                }, allow_val_change=True)
+        except ImportError:
+            pass
+
     trainer.train()
     trainer.save_model(os.path.join(training_args.output_dir, "checkpoint-final"))
     trainer.processing_class.save_pretrained(

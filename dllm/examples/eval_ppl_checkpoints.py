@@ -102,7 +102,6 @@ def _load_eval_dataset(eval_data_path: str, text_field: str, tokenizer, max_leng
 
     logger.info(f"Tokenizing {len(raw)} eval examples ...")
     tokenized = raw.map(tokenize, batched=True, remove_columns=raw.column_names)
-    tokenized.set_format(type="torch")
     return tokenized
 
 
@@ -160,6 +159,8 @@ def eval_checkpoint(
 
     nll_metric = NLLMetric().to(device)
     ppl_metric = PPLMetric().to(device)
+    acc_correct = torch.tensor(0, dtype=torch.long, device=device)
+    acc_total = torch.tensor(0, dtype=torch.long, device=device)
 
     for batch in loader:
         input_ids = batch["input_ids"].to(device)        # [b, l]
@@ -229,15 +230,21 @@ def eval_checkpoint(
         nll_metric.update(weighted_nll, maskable_mask.float())
         ppl_metric.update(weighted_nll, maskable_mask.float())
 
+        # === Top-1 accuracy at masked positions ===
+        preds = logits.argmax(dim=-1)                    # [b, l]
+        acc_correct += ((preds == input_ids) & masked_mask).sum()
+        acc_total += masked_mask.sum()
+
     nll_val = nll_metric.compute().item()
     ppl_val = ppl_metric.compute().item()
+    acc_val = (acc_correct.float() / acc_total.clamp(min=1)).item()
 
-    logger.info(f"  NLL={nll_val:.4f}  PPL={ppl_val:.2f}")
+    logger.info(f"  NLL={nll_val:.4f}  PPL={ppl_val:.2f}  ACC={acc_val:.4f}")
 
     del model
     torch.cuda.empty_cache()
 
-    return {"checkpoint": model_path, "nll": nll_val, "ppl": ppl_val}
+    return {"checkpoint": model_path, "nll": nll_val, "ppl": ppl_val, "acc": acc_val}
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +373,7 @@ def main():
         # Print table row
         step = re.search(r"checkpoint-(\w+)", ckpt)
         step_str = step.group(1) if step else os.path.basename(ckpt)
-        print(f"step={step_str:>8}  NLL={result['nll']:.4f}  PPL={result['ppl']:.2f}")
+        print(f"step={step_str:>8}  NLL={result['nll']:.4f}  PPL={result['ppl']:.2f}  ACC={result['acc']:.4f}")
 
     # --- Save results ---
     with open(args.output_file, "w") as f:
@@ -375,11 +382,11 @@ def main():
 
     # --- Summary table ---
     print("\n=== VLB Perplexity across checkpoints ===")
-    print(f"{'Checkpoint':<40} {'NLL':>8} {'PPL':>8}")
-    print("-" * 60)
+    print(f"{'Checkpoint':<40} {'NLL':>8} {'PPL':>8} {'ACC':>8}")
+    print("-" * 62)
     for r in results:
         name = os.path.basename(r["checkpoint"])
-        print(f"{name:<40} {r['nll']:>8.4f} {r['ppl']:>8.2f}")
+        print(f"{name:<40} {r['nll']:>8.4f} {r['ppl']:>8.2f} {r['acc']:>8.4f}")
 
 
 if __name__ == "__main__":
