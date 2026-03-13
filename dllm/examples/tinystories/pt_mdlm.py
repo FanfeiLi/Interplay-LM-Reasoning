@@ -23,6 +23,7 @@ Usage (8 GPUs, ZeRO-2):
         --training_data_dir /path/to/TinyStories/training_data
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -157,6 +158,28 @@ def train():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     dllm.utils.print_args_main(model_args, data_args, training_args)
     dllm.utils.initial_training_setup(model_args, data_args, training_args)
+
+    # Save human-readable hyperparams to output dir (process 0 only)
+    if accelerate.PartialState().is_main_process:
+        os.makedirs(training_args.output_dir, exist_ok=True)
+        hparams = {
+            "model_name_or_path": model_args.model_name_or_path,
+            "training_data_dir": data_args.training_data_dir,
+            "max_length": data_args.max_length,
+            "learning_rate": training_args.learning_rate,
+            "weight_decay": training_args.weight_decay,
+            "lr_scheduler_type": training_args.lr_scheduler_type,
+            "warmup_ratio": training_args.warmup_ratio,
+            "max_grad_norm": training_args.max_grad_norm,
+            "per_device_train_batch_size": training_args.per_device_train_batch_size,
+            "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
+            "gradient_checkpointing": training_args.gradient_checkpointing,
+            "num_train_epochs": training_args.num_train_epochs,
+            "max_steps": training_args.max_steps,
+            "seed": training_args.seed,
+        }
+        with open(os.path.join(training_args.output_dir, "hparams.json"), "w") as f:
+            json.dump(hparams, f, indent=2)
 
     # ----- Model ------------------------------------------------------------------
     config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
