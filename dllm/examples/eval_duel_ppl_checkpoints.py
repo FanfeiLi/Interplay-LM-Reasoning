@@ -353,7 +353,9 @@ def eval_checkpoint(
 
     subset = eval_dataset
     if max_samples > 0:
-        subset = eval_dataset.select(range(min(max_samples, len(eval_dataset))))
+        n = min(max_samples, len(eval_dataset))
+        indices = torch.randperm(len(eval_dataset))[:n].tolist()
+        subset = eval_dataset.select(indices)
 
     total_ll = 0.0
     total_tokens = 0
