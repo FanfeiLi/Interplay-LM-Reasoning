@@ -20,9 +20,13 @@
 # Environment variables:
 #   GPU_LIST           GPU IDs (default: 0,1,2,3,4,5,6,7)
 #   ACCEL_CONFIG       Accelerate config name (default: ddp)
-#   TRAINING_DATA_DIR  Path to TinyStories parquets
+#   TRAINING_DATA_DIR  Path to training parquets (TinyStories or Wikipedia)
 #   SEED               Random seed (default: 42)
 #   WANDB_PROJECT      W&B project name (default: dllm-tinystories-ngram)
+#   NUM_EPOCHS         Number of training epochs (default: 8)
+#   EVAL_STRATEGY      "no", "steps", or "epoch" (default: no)
+#   EVAL_STEPS         Eval every N steps when EVAL_STRATEGY=steps (default: 100)
+#   SAVE_STEPS         Save checkpoint every N steps (default: 100)
 # =============================================================================
 
 set -e
@@ -55,8 +59,9 @@ get_batch_config() {
         100M) BATCH_SIZE=64; GRAD_ACCUM=1; GRAD_CKPT="False" ;;
         200M) BATCH_SIZE=32; GRAD_ACCUM=2; GRAD_CKPT="True"  ;;
         400M) BATCH_SIZE=16; GRAD_ACCUM=4; GRAD_CKPT="True"  ;;
+        1.4B) BATCH_SIZE=8;  GRAD_ACCUM=8; GRAD_CKPT="True"  ;;
         *)
-            echo "Error: Unknown size '${SIZE}'. Use 100M, 200M, or 400M."
+            echo "Error: Unknown size '${SIZE}'. Use 100M, 200M, 400M, or 1.4B."
             exit 1
             ;;
     esac
@@ -126,7 +131,7 @@ accelerate launch \
     --model_name_or_path "${MODEL_CONFIG}" \
     --training_data_dir "${TRAINING_DATA_DIR}" \
     --max_length 2048 \
-    --num_train_epochs 8 \
+    --num_train_epochs "${NUM_EPOCHS:-8}" \
     --learning_rate 3e-4 \
     --weight_decay 0.1 \
     --lr_scheduler_type cosine \
@@ -137,9 +142,10 @@ accelerate launch \
     --gradient_checkpointing "${GRAD_CKPT}" \
     --bf16 True \
     --logging_steps 10 \
-    --save_steps 100 \
+    --save_steps "${SAVE_STEPS:-100}" \
     --save_total_limit 50 \
-    --eval_strategy "no" \
+    --eval_strategy "${EVAL_STRATEGY:-no}" \
+    --eval_steps "${EVAL_STEPS:-100}" \
     --report_to wandb \
     --run_name "${RUN_NAME}" \
     --output_dir "${OUTPUT_DIR}" \
